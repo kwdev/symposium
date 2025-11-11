@@ -2274,37 +2274,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rust-crate-sources-proxy"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "cargo_metadata",
- "crates_io_api",
- "dirs",
- "flate2",
- "futures",
- "home",
- "jsonrpcmsg",
- "regex",
- "reqwest",
- "rmcp",
- "sacp",
- "sacp-conductor",
- "sacp-proxy",
- "sacp-tokio",
- "schemars",
- "semver",
- "serde",
- "serde_json",
- "tar",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "rustix"
 version = "0.38.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2760,13 +2729,13 @@ dependencies = [
  "anyhow",
  "chrono",
  "futures",
- "rust-crate-sources-proxy",
  "sacp",
  "sacp-conductor",
  "sacp-tokio",
  "schemars",
  "serde",
  "serde_json",
+ "symposium-crate-sources-proxy",
  "tokio",
  "tokio-util",
  "tracing",
@@ -2780,6 +2749,37 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "which 4.4.2",
+]
+
+[[package]]
+name = "symposium-crate-sources-proxy"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cargo_metadata",
+ "crates_io_api",
+ "dirs",
+ "flate2",
+ "futures",
+ "home",
+ "jsonrpcmsg",
+ "regex",
+ "reqwest",
+ "rmcp",
+ "sacp",
+ "sacp-conductor",
+ "sacp-proxy",
+ "sacp-tokio",
+ "schemars",
+ "semver",
+ "serde",
+ "serde_json",
+ "tar",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -76,8 +76,9 @@ pub fn symposium_conductor() -> Result<Conductor> {
 
             // TODO: Examine init_req.capabilities to determine what's needed
 
-            let components: Vec<Box<dyn Component>> =
-                vec![Box::new(rust_crate_sources_proxy::CrateSourcesProxy {})];
+            let components: Vec<Box<dyn Component>> = vec![Box::new(
+                symposium_crate_sources_proxy::CrateSourcesProxy {},
+            )];
 
             // TODO: Add more components based on capabilities
             // - Check for IDE operation capabilities

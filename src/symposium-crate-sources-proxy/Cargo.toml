@@ -1,10 +1,10 @@
 [package]
-name = "rust-crate-sources-proxy"
+name = "symposium-crate-sources-proxy"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "rust-crate-sources-proxy"
+name = "symposium-crate-sources-proxy"
 path = "src/main.rs"
 
 [dependencies]

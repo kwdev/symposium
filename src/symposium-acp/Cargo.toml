@@ -24,4 +24,4 @@ chrono = "0.4"
 tokio-util = { version = "0.7", features = ["compat"] }
 
 # Proxy components
-rust-crate-sources-proxy = { path = "../rust-crate-sources-proxy" }
+symposium-crate-sources-proxy = { path = "../symposium-crate-sources-proxy" }
