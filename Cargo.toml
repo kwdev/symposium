@@ -3,7 +3,9 @@ members = [
     "setup",
     "md-rfd-preprocessor",
     "ci",
-    "src/symposium-acp", "src/rust-crate-sources-proxy",
+    "src/symposium-acp",
+    "src/rust-crate-sources-proxy",
+    "src/cli-agent-util",
 ]
 resolver = "2"
 

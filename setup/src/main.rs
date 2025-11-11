@@ -4,11 +4,11 @@
 //! Builds the Rust MCP server, VSCode extension, and configures them for use
 //! with AI assistants like Claude CLI and Q CLI.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clap::Parser;
-use symposium_cli_agent_util::{detect_cli_agents, McpServer};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use symposium_cli_agent_util::{McpServer, detect_cli_agents};
 
 #[derive(Parser)]
 #[command(
@@ -168,7 +168,7 @@ fn check_vscode() -> Result<()> {
 
 fn check_cli_tools() -> Result<()> {
     let agents = detect_cli_agents();
-    
+
     if agents.is_empty() {
         return Err(anyhow!(
             "❌ No supported CLI tools found. Please install Q CLI or Claude Code.\n   Q CLI: https://docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/q-cli.html\n   Claude Code: https://claude.ai/code"
@@ -179,7 +179,7 @@ fn check_cli_tools() -> Result<()> {
 
 fn setup_mcp_servers(binary_path: &Path) -> Result<()> {
     let agents = detect_cli_agents();
-    
+
     if agents.is_empty() {
         println!("⚠️  No CLI agents detected, skipping MCP server setup");
         return Ok(());
@@ -205,21 +205,30 @@ fn setup_mcp_servers(binary_path: &Path) -> Result<()> {
 
     let mut success = true;
     for agent in &agents {
-        println!("🔧 Registering Symposium MCP server with {}...", agent.name());
+        println!(
+            "🔧 Registering Symposium MCP server with {}...",
+            agent.name()
+        );
         println!("   Binary path: {}", binary_path.display());
-        println!("   Development mode: logging to /tmp/symposium-mcp.log with RUST_LOG=symposium_mcp=debug");
-        
+        println!(
+            "   Development mode: logging to /tmp/symposium-mcp.log with RUST_LOG=symposium_mcp=debug"
+        );
+
         match agent.install_mcp(&symposium_server) {
             Ok(result) => success &= result,
             Err(e) => {
-                println!("❌ Failed to setup Symposium MCP for {}: {}", agent.name(), e);
+                println!(
+                    "❌ Failed to setup Symposium MCP for {}: {}",
+                    agent.name(),
+                    e
+                );
                 success = false;
             }
         }
 
         println!("✨ Registering Sparkle MCP server with {}...", agent.name());
         println!("   Binary path: {}", sparkle_binary_path.display());
-        
+
         match agent.install_mcp(&sparkle_server) {
             Ok(result) => success &= result,
             Err(e) => {
@@ -257,7 +266,9 @@ fn print_completion_message(built_vscode: bool, built_mcp: bool, built_app: bool
         for agent in agents {
             match agent.name().as_str() {
                 "Q CLI" => println!("   q chat \"Present a review of the changes you just made\""),
-                "Claude Code" => println!("   claude chat \"Present a review of the changes you just made\""),
+                "Claude Code" => {
+                    println!("   claude chat \"Present a review of the changes you just made\"")
+                }
                 _ => {}
             }
         }
@@ -312,7 +323,7 @@ fn build_and_install_rust_server() -> Result<PathBuf> {
     }
 
     println!("✅ Rust server installed successfully!");
-    
+
     // Return full path to the installed binary
     let home = std::env::var("HOME").context("HOME environment variable not set")?;
     Ok(PathBuf::from(home).join(".cargo/bin/symposium-mcp"))
@@ -329,7 +340,7 @@ fn build_and_install_sparkle_cli() -> Result<()> {
             "--git",
             "https://github.com/symposium-dev/sparkle.git",
             "sparkle-mcp",
-            "--force"
+            "--force",
         ])
         .output()
         .context("Failed to execute cargo install for Sparkle")?;

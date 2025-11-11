@@ -32,17 +32,11 @@ pub async fn run() -> Result<()> {
     let mcp_registry = McpServiceRegistry::default()
         .with_rmcp_server("rust-crate-sources", RustCrateSourcesService::new)?;
 
-    // Connect to stdio and serve
-    use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
-
     sacp::JrHandlerChain::new()
         .name("rust-crate-sources-proxy")
         .provide_mcp(mcp_registry)
         .proxy()
-        .connect_to(sacp::ByteStreams::new(
-            tokio::io::stdout().compat_write(),
-            tokio::io::stdin().compat(),
-        ))?
+        .connect_to(sacp_tokio::Stdio::default())?
         .serve()
         .await?;
 
@@ -50,7 +44,7 @@ pub async fn run() -> Result<()> {
 }
 
 /// A proxy which forwards all messages to its successor, adding access to the rust-crate-sources MCP server.
-pub struct CrateSourcesProxy {}
+pub struct CrateSourcesProxy;
 
 impl Component for CrateSourcesProxy {
     fn serve(
