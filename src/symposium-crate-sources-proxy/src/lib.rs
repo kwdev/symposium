@@ -47,26 +47,17 @@ pub async fn run() -> Result<()> {
 pub struct CrateSourcesProxy;
 
 impl Component for CrateSourcesProxy {
-    fn serve(
-        self: Box<Self>,
-        channels: sacp::Channels,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = std::result::Result<(), sacp::Error>> + Send + 'static,
-        >,
-    > {
-        Box::pin(async move {
-            let mcp_registry = McpServiceRegistry::default()
-                .with_rmcp_server("rust-crate-sources", RustCrateSourcesService::new)?;
+    async fn serve(self, channels: sacp::Channels) -> Result<(), sacp::Error> {
+        let mcp_registry = McpServiceRegistry::default()
+            .with_rmcp_server("rust-crate-sources", RustCrateSourcesService::new)?;
 
-            sacp::JrHandlerChain::new()
-                .name("rust-crate-sources-proxy")
-                .provide_mcp(mcp_registry)
-                .proxy()
-                .connect_to(channels)?
-                .serve()
-                .await
-        })
+        sacp::JrHandlerChain::new()
+            .name("rust-crate-sources-proxy")
+            .provide_mcp(mcp_registry)
+            .proxy()
+            .connect_to(channels)?
+            .serve()
+            .await
     }
 }
 

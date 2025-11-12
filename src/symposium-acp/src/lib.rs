@@ -14,7 +14,6 @@
 pub mod logging;
 
 use anyhow::Result;
-use sacp::component::Component;
 use sacp_conductor::conductor::Conductor;
 
 /// Run the Symposium ACP meta proxy
@@ -76,7 +75,7 @@ pub fn symposium_conductor() -> Result<Conductor> {
 
             // TODO: Examine init_req.capabilities to determine what's needed
 
-            let components: Vec<Box<dyn Component>> = vec![Box::new(
+            let components: Vec<sacp::DynComponent> = vec![sacp::DynComponent::new(
                 symposium_crate_sources_proxy::CrateSourcesProxy {},
             )];
 
