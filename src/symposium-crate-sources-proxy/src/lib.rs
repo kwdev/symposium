@@ -47,7 +47,7 @@ pub async fn run() -> Result<()> {
 pub struct CrateSourcesProxy;
 
 impl Component for CrateSourcesProxy {
-    async fn serve(self, channels: sacp::Channels) -> Result<(), sacp::Error> {
+    async fn serve(self, client: impl Component) -> Result<(), sacp::Error> {
         let mcp_registry = McpServiceRegistry::default()
             .with_rmcp_server("rust-crate-sources", RustCrateSourcesService::new)?;
 
@@ -55,7 +55,7 @@ impl Component for CrateSourcesProxy {
             .name("rust-crate-sources-proxy")
             .provide_mcp(mcp_registry)
             .proxy()
-            .connect_to(channels)?
+            .connect_to(client)?
             .serve()
             .await
     }

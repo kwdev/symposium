@@ -1102,9 +1102,9 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
 name = "hyper"
-version = "1.7.0"
+version = "1.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eb3aa54a13a0dfe7fbe3a59e0c76093041720fdc77b110cc0fc260fafb4dc51e"
+checksum = "1744436df46f0bde35af3eda22aeaba453aada65d8f1c171cd8a5f59030bd69f"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -2376,9 +2376,9 @@ checksum = "28d3b2b1366ec20994f1fd18c3c594f05c5dd4bc44d8bb0c1c632c8d6829481f"
 
 [[package]]
 name = "sacp"
-version = "1.0.0-alpha.6"
+version = "1.0.0-alpha.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee439bc3f1747be16a107e113e884347eda6ed1ac60dab298f16a3878f72fb01"
+checksum = "cae56d1798b7ed9eb5d1f52ff187fd71b7829fbdad64a2a33595ebb7df99b409"
 dependencies = [
  "agent-client-protocol-schema",
  "anyhow",
@@ -2394,9 +2394,9 @@ dependencies = [
 
 [[package]]
 name = "sacp-conductor"
-version = "1.0.0-alpha.8"
+version = "1.0.0-alpha.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac76f671a901c9677972597affd1b04947d43fe6750920b5500896932aa013e9"
+checksum = "fe5e8d08434bcf2bd7b79310955b0c171a3a0b95d5c9f71c2e614a4165e62703"
 dependencies = [
  "agent-client-protocol-schema",
  "anyhow",
@@ -2420,9 +2420,9 @@ dependencies = [
 
 [[package]]
 name = "sacp-proxy"
-version = "1.0.0-alpha.6"
+version = "1.0.0-alpha.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07caa26793d1b9d9d89c0e4b2083da959d29bd969c1cc6e3a7b582fa8ea7ba31"
+checksum = "1e5ffbbdd4d0fb53e5288102e4d44e90f7ea3857b5253a7b9fd27d1f9dc4e693"
 dependencies = [
  "agent-client-protocol-schema",
  "futures",
@@ -2439,9 +2439,9 @@ dependencies = [
 
 [[package]]
 name = "sacp-tokio"
-version = "1.0.0-alpha.7"
+version = "1.0.0-alpha.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "025d9ae192ca3e6104a8f86e8daeee01164c9ca0f1dcbd6584c24764d7e7aa0f"
+checksum = "167351aae9fbf2cf8c91586ceaced260710297ad8e6d77b5edf1a0f9e3f2dea9"
 dependencies = [
  "futures",
  "sacp",
