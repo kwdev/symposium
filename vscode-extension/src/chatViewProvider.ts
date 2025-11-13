@@ -1,11 +1,19 @@
 import * as vscode from "vscode";
 import { HomerActor } from "./homerActor";
 
+interface BufferedMessage {
+  type: string;
+  tabId: string;
+  messageId: string;
+  chunk?: string;
+}
+
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = "symposium.chatView";
   private static readonly STATE_KEY = "symposium.chatState";
   private _view?: vscode.WebviewView;
   private _sessions: Map<string, HomerActor> = new Map();
+  private _messageBuffer: BufferedMessage[] = [];
 
   constructor(
     private readonly _extensionUri: vscode.Uri,
@@ -26,6 +34,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
 
+    // Handle webview visibility changes
+    webviewView.onDidChangeVisibility(() => {
+      if (webviewView.visible) {
+        console.log("Webview became visible");
+        this._onWebviewVisible();
+      } else {
+        console.log("Webview became hidden");
+        this._onWebviewHidden();
+      }
+    });
+
     // Handle messages from the webview
     webviewView.webview.onDidReceiveMessage(async (message) => {
       switch (message.type) {
@@ -45,7 +64,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
           // Stream the response progressively
           for await (const chunk of session.processPrompt(message.prompt)) {
-            webviewView.webview.postMessage({
+            this._sendToWebview({
               type: "response-chunk",
               tabId: message.tabId,
               messageId: message.messageId,
@@ -53,7 +72,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             });
           }
           // Send final message to indicate streaming is complete
-          webviewView.webview.postMessage({
+          this._sendToWebview({
             type: "response-complete",
             tabId: message.tabId,
             messageId: message.messageId,
@@ -82,6 +101,53 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           break;
       }
     });
+  }
+
+  private _sendToWebview(message: any) {
+    if (!this._view) {
+      return;
+    }
+
+    if (this._view.visible) {
+      // Webview is visible, send immediately
+      this._view.webview.postMessage(message);
+    } else {
+      // Webview is hidden, buffer the message
+      console.log("Buffering message (webview hidden):", message.type);
+      this._messageBuffer.push(message);
+    }
+  }
+
+  private async _onWebviewVisible() {
+    if (!this._view) {
+      return;
+    }
+
+    // Restore saved state
+    const savedState = this._context.workspaceState.get(
+      ChatViewProvider.STATE_KEY,
+    );
+    console.log("Restoring state on visibility:", savedState);
+    await this._view.webview.postMessage({
+      type: "restore-state",
+      state: savedState,
+    });
+
+    // Replay buffered messages
+    if (this._messageBuffer.length > 0) {
+      console.log(`Replaying ${this._messageBuffer.length} buffered messages`);
+      for (const message of this._messageBuffer) {
+        await this._view.webview.postMessage(message);
+      }
+      this._messageBuffer = [];
+    }
+  }
+
+  private async _onWebviewHidden() {
+    // Save current state when webview is hidden
+    // Note: We rely on the webview to send us the state via save-state message
+    // before it becomes hidden, so we don't need to do anything here
+    console.log("Webview hidden - future messages will be buffered");
   }
 
   private _getHtmlForWebview(webview: vscode.Webview) {
