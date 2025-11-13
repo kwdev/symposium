@@ -1,16 +1,25 @@
 [workspace]
 members = [
-    "symposium/mcp-server", 
-    "symposium/cli-agent-util",
-    "setup", 
-    "md-rfd-preprocessor", 
-    "ci", 
+    "setup",
+    "md-rfd-preprocessor",
+    "ci",
+    "src/symposium-acp",
+    "src/symposium-crate-sources-proxy",
+    "src/cli-agent-util",
+    "src/sacp-tee",
 ]
 resolver = "2"
 
 [workspace.dependencies]
+sacp = { version = "1.0.0-alpha.7" }
+sacp-proxy = { version = "1.0.0-alpha.7" }
+sacp-tokio = { version = "1.0.0-alpha.8" }
+sacp-conductor = { version = "1.0.0-alpha.9" }
+jsonrpcmsg = "0.1.2"
+
 # Core async runtime
 tokio = { version = "1.0", features = ["full"] }
+futures = "0.3.31"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -31,12 +40,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # MCP SDK
 rmcp = { version = "0.8", features = ["server", "transport-io", "schemars"] }
 
+# Sparkle integration
+sparkle = { package = "sparkle-mcp", git = "https://github.com/nikomatsakis/sparkle.git", branch = "main" }
+
 # CLI parsing
 clap = { version = "4.0", features = ["derive"] }
 
 # Setup tool dependencies
 which = "6.0"
 home = "0.5"
-
-# Testing
-tokio-test = "0.4"

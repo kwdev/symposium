@@ -1,59 +1,61 @@
 # Implementation Overview
 
-Symposium consists of several major components:
+Symposium appears to external clients as a single ACP proxy, but internally uses a **conductor** to orchestrate a dynamic chain of component proxies. This architecture allows Symposium to adapt to different client capabilities and provide consistent functionality regardless of what the editor or agent natively supports.
 
-* a MCP server, implemented in Rust (`symposium/mcp-server`), which also serves as an IPC bus;
-* a VSCode extension, implemented in TypeScript (`symposium/vscode`);
-* a desktop application, implemented in Swift (`symposium/macos-app`).
+## Architecture
 
-## Chart
+### External View
+
+From the outside, Symposium is a standard ACP proxy that sits between an editor and an agent:
 
 ```mermaid
-flowchart TD
-    Agent
-    User
-
-    User -- makes requests --> Agent
-
-    Agent -- invokes MCP tools --> MCP
-
-    subgraph L [Symposium]
-        IDE["IDE Extension
-            (impl'd in TypeScript
-            or lang appropriate for IDE)"]
-        MCP["symposium-mcp server
-            (impl'd in Rust)"]
-        APP["Desktop application
-            (impl'd in Swift)"]
-
-        MCP <--> IDE
-        MCP <--> APP
-        IDE <--> APP
-    end
-
-    L -..- BUS
-    BUS["All communication actually goes over a central IPC Bus"]
-
+flowchart LR
+    Editor --> Symposium --> Agent
 ```
 
-## IPC Bus
+### Internal Structure
 
-All components talk over an IPC bus which is implemented in `symposium-mcp`. The IDE + application connect to this bus by running `symposium-mcp client`. This will create a daemon process (using `symposium-mcp server`) if one is not already running. The MCP server just runs the code inline, starting the server if needed.
+Internally, Symposium runs a [conductor](https://symposium-dev.github.io/symposium-acp/) in proxy mode that orchestrates multiple component proxies:
 
-The client has a simple interface:
-
-* a message is a single-line of json;
-* each message that is sent is forwarded to all connected clients (including the sender);
-* there are some special "control" messages that begin with `#`, e.g.
-    * `#identify:name` sets the "id" for this client to "name"
-    * see `handle_debug_command` in `daemon.rs`
-
-## Debugging
-
-The server tracks the last N messages that have been gone out over the bus for debugging purposes. You can run
-
-```bash
-symposium-mcp debug
+```mermaid
+flowchart LR
+    Editor --> S[Symposium Conductor]
+    S --> C1[Component 1]
+    C1 --> A1[Adapter 1]
+    A1 --> C2[Component 2]
+    C2 --> Agent
 ```
 
-to access those logs. Very useful!
+The conductor dynamically builds this chain based on what capabilities the editor and agent provide.
+
+## Component Pattern
+
+Some Symposium features are implemented as **component/adapter pairs**:
+
+### Components
+
+Components provide functionality to agents through MCP tools and other mechanisms. They:
+- Expose high-level capabilities (e.g., Dialect-based IDE operations)
+- May rely on primitive capabilities from upstream (the editor)
+- Are always included in the chain when their functionality is relevant
+
+### Adapters
+
+Adapters "shim" for missing primitive capabilities by providing fallback implementations. They:
+- Check whether required primitive capabilities exist upstream
+- Provide the capability if it's missing (e.g., spawn rust-analyzer to provide IDE operations)
+- Pass through transparently if the capability already exists
+- Are conditionally included only when needed
+
+## Capability-Driven Assembly
+
+During initialization, Symposium:
+
+1. **Receives capabilities from the editor** - examines what the upstream client provides
+2. **Queries the agent** - discovers what capabilities the downstream agent supports
+3. **Builds the proxy chain** - spawns components and adapters based on detected gaps and opportunities
+4. **Advertises enriched capabilities** - tells the editor what the complete chain provides
+
+This approach allows Symposium to work with minimal ACP clients (by providing fallback implementations) while taking advantage of native capabilities when available (by passing through directly).
+
+For detailed information about the initialization sequence and capability negotiation, see [Initialization Sequence](./initialization-sequence.md).
