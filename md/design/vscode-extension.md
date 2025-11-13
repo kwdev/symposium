@@ -220,28 +220,19 @@ Future enhancement: Could support multiple sessions per tab, but one-to-one mapp
 
 ## Implementation Status
 
-### Current (Homer Actor Phase)
+### Current (Architecture Complete)
 
 - ✅ Webview with mynah-ui rendering
 - ✅ Message passing between webview and extension
 - ✅ Streaming response display
 - ✅ State persistence and restoration
 - ✅ UUID-based message identification
-- ⚠️ HomerActor as placeholder agent (per-message instances)
-- ⚠️ No explicit tab lifecycle messages
-- ⚠️ No agent session management
-- ⚠️ No webview activate/deactivate handling
-- ⚠️ No message buffering
-
-### Next Phase (Architecture Alignment)
-
-- [ ] Add new-tab lifecycle message
-- [ ] Implement singleton agent pattern
-- [ ] Add session management to agent
-- [ ] Map tab IDs to sessions in extension
-- [ ] Implement webview activation detection
-- [ ] Add message buffering for inactive webview
-- [ ] Add buffer replay on activation
+- ✅ Tab lifecycle messaging (new-tab events)
+- ✅ Session management (tabId → HomerActor mapping)
+- ✅ Webview visibility tracking
+- ✅ Message buffering when webview inactive
+- ✅ State restoration and buffer replay on activation
+- ⚠️ HomerActor as placeholder agent (not real ACP)
 
 ### Future Phase (ACP Integration)
 
