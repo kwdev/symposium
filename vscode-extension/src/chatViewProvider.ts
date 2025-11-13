@@ -1,25 +1,29 @@
-import * as vscode from 'vscode';
+import * as vscode from "vscode";
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
-    public static readonly viewType = 'symposium.chatView';
+  public static readonly viewType = "symposium.chatView";
 
-    constructor(private readonly _extensionUri: vscode.Uri) {}
+  constructor(private readonly _extensionUri: vscode.Uri) {}
 
-    public resolveWebviewView(
-        webviewView: vscode.WebviewView,
-        context: vscode.WebviewViewResolveContext,
-        _token: vscode.CancellationToken
-    ) {
-        webviewView.webview.options = {
-            enableScripts: true,
-            localResourceRoots: [this._extensionUri]
-        };
+  public resolveWebviewView(
+    webviewView: vscode.WebviewView,
+    context: vscode.WebviewViewResolveContext,
+    _token: vscode.CancellationToken,
+  ) {
+    webviewView.webview.options = {
+      enableScripts: true,
+      localResourceRoots: [this._extensionUri],
+    };
 
-        webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
-    }
+    webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
+  }
 
-    private _getHtmlForWebview(webview: vscode.Webview) {
-        return `<!DOCTYPE html>
+  private _getHtmlForWebview(webview: vscode.Webview) {
+    const scriptUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this._extensionUri, "out", "webview.js"),
+    );
+
+    return `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -27,20 +31,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     <title>Symposium Chat</title>
     <style>
         body {
-            padding: 10px;
-            color: var(--vscode-foreground);
-            font-family: var(--vscode-font-family);
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
         }
-        h1 {
-            font-size: 1.2em;
-            margin: 0 0 10px 0;
+        #mynah-root {
+            width: 100%;
+            height: 100vh;
         }
     </style>
 </head>
 <body>
-    <h1>Symposium Chat</h1>
-    <p>Chat interface coming soon...</p>
+    <div id="mynah-root"></div>
+    <script src="${scriptUri}"></script>
 </body>
 </html>`;
-    }
+  }
 }
