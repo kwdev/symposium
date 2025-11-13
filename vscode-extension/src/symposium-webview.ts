@@ -81,8 +81,12 @@ window.addEventListener("message", (event: MessageEvent) => {
   const message = event.data;
 
   if (message.type === "restore-state") {
-    // Initialize mynah-ui with saved state (or undefined if no saved state)
-    initializeMynahUI(message.state);
+    // Only initialize if not already initialized
+    if (!mynahUI) {
+      initializeMynahUI(message.state);
+    } else {
+      console.log("MynahUI already initialized, ignoring restore-state");
+    }
     return;
   }
 
