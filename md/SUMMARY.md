@@ -12,13 +12,13 @@
 
 - [Introduction](./introduction.md)
 - [About](./about.md)
-    - [Tenets and design goals](./tenets.md)
+    - [Rust Crate Sources Tool](./rust-expertise.md)
+    - [Rich Collaboration](./rich-collaboration.md)
 
 # Design and implementation
 
 - [Overview](./design/implementation-overview.md)
 - [Components](./design/components.md)
-    - [IDE Operations](./design/ide_operations.md)
 
 # References
 

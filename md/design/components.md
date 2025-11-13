@@ -64,19 +64,28 @@ Adapters sit closer to the editor, components sit closer to the agent.
 
 ## Current Components
 
-### IDE Operations
+### Rust Crate Sources
 
-Provides IDE-aware code navigation and search capabilities through the Dialect language.
+Provides access to published Rust crate source code through an MCP server.
 
-- **Adapter:** Checks for `ide_operations` capability, spawns language servers as fallback
-- **Component:** Exposes `ide_operation` MCP tool that accepts Dialect programs
+- **Type:** Standalone component
+- **Implementation:** Injects an MCP server that exposes the `rust-crate-sources` tool
+- **Function:** Allows agents to fetch and examine source code from crates.io
 
-See [IDE Operations](./ide_operations.md) for detailed design.
+### Sparkle
+
+Provides AI collaboration framework through prompt injection and MCP tooling.
+
+- **Type:** Standalone component
+- **Implementation:** Injects Sparkle MCP server with collaboration tools
+- **Function:** Enables partnership dynamics, pattern anchors, and meta-collaboration capabilities
+- **Documentation:** [Sparkle docs](https://symposium-dev.github.io/sparkle/)
 
 ## Future Components
 
 Additional components can be added following these patterns:
 
-- **Walkthroughs** - Interactive code explanations (may need component/adapter pair)
-- **Git Operations** - Repository analysis (likely standalone)
-- **Build Integration** - Compilation and testing workflows (likely standalone)
+- **IDE Operations** - Code navigation and search (likely component/adapter pair)
+- **Walkthroughs** - Interactive code explanations
+- **Git Operations** - Repository analysis
+- **Build Integration** - Compilation and testing workflows

@@ -59,21 +59,3 @@ During initialization, Symposium:
 This approach allows Symposium to work with minimal ACP clients (by providing fallback implementations) while taking advantage of native capabilities when available (by passing through directly).
 
 For detailed information about the initialization sequence and capability negotiation, see [Initialization Sequence](./initialization-sequence.md).
-
-## Example: IDE Operations
-
-The IDE Operations feature demonstrates the component/adapter pattern:
-
-**If the editor provides primitive IDE operations:**
-```
-Editor → Symposium → IDE Ops Component → Agent
-         (conductor)  (enriches to MCP tools)
-```
-
-**If the editor lacks IDE operations:**
-```
-Editor → Symposium → IDE Ops Adapter → IDE Ops Component → Agent
-         (conductor)  (spawns LSP)      (enriches to MCP tools)
-```
-
-In both cases, the agent receives the same `ide_operation` MCP tool, but the path to providing it differs based on what the editor supports.
