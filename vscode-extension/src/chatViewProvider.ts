@@ -59,6 +59,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       onAgentText: (agentSessionId, text) => {
         const tabId = this.#agentSessionToTab.get(agentSessionId);
         if (tabId) {
+          // Capture for testing if enabled
+          if (this.#testResponseCapture.has(tabId)) {
+            this.#testResponseCapture.get(tabId)!.push(text);
+          }
+
           this.#sendToWebview({
             type: "agent-text",
             tabId,
@@ -347,6 +352,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     return Array.from(this.#tabToAgentSession.keys());
   }
 
+  // Store agent responses for testing
+  #testResponseCapture: Map<string, string[]> = new Map();
+
+  public startCapturingResponses(tabId: string): void {
+    this.#testResponseCapture.set(tabId, []);
+  }
+
+  public getResponse(tabId: string): string {
+    const chunks = this.#testResponseCapture.get(tabId) || [];
+    return chunks.join("");
+  }
+
+  public stopCapturingResponses(tabId: string): void {
+    this.#testResponseCapture.delete(tabId);
+  }
+
   async #handleWebviewMessage(message: any): Promise<void> {
     // This is the same logic from resolveWebviewView's onDidReceiveMessage
     // We'll need to refactor to share this code
@@ -377,6 +398,48 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           });
         } catch (err) {
           console.error("Failed to create agent session:", err);
+        }
+        break;
+
+      case "prompt":
+        try {
+          logger.info("agent", "Received prompt", { tabId: message.tabId });
+
+          // Get the agent session for this tab
+          const agentSessionId = this.#tabToAgentSession.get(message.tabId);
+          if (!agentSessionId) {
+            logger.error("agent", "No agent session found for tab", {
+              tabId: message.tabId,
+            });
+            return;
+          }
+
+          // Get the configuration and actor for this tab
+          const tabConfig = this.#tabToConfig.get(message.tabId);
+          if (!tabConfig) {
+            logger.error("agent", "No configuration found for tab", {
+              tabId: message.tabId,
+            });
+            return;
+          }
+
+          const tabActor = this.#configToActor.get(tabConfig.key());
+          if (!tabActor) {
+            logger.error("agent", "No actor found for configuration", {
+              configKey: tabConfig.key(),
+            });
+            return;
+          }
+
+          logger.info("agent", "Sending prompt to agent", {
+            tabId: message.tabId,
+            agentSessionId,
+          });
+
+          // Send prompt to agent (responses come via callbacks)
+          await tabActor.sendPrompt(agentSessionId, message.prompt);
+        } catch (err) {
+          logger.error("agent", "Failed to send prompt", { error: err });
         }
         break;
     }

@@ -79,6 +79,46 @@ export function activate(context: vscode.ExtensionContext) {
       return chatProvider.getTabsForTesting();
     }),
   );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "symposium.test.sendPrompt",
+      async (tabId: string, prompt: string) => {
+        await chatProvider.simulateWebviewMessage({
+          type: "prompt",
+          tabId,
+          prompt,
+        });
+      },
+    ),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "symposium.test.startCapturingResponses",
+      (tabId: string) => {
+        chatProvider.startCapturingResponses(tabId);
+      },
+    ),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "symposium.test.getResponse",
+      (tabId: string) => {
+        return chatProvider.getResponse(tabId);
+      },
+    ),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "symposium.test.stopCapturingResponses",
+      (tabId: string) => {
+        chatProvider.stopCapturingResponses(tabId);
+      },
+    ),
+  );
 }
 
 export function deactivate() {}
