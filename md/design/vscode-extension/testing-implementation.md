@@ -1,19 +1,12 @@
 # Testing Implementation
 
-This chapter documents the testing framework built for the VSCode extension, including the architecture, patterns, and rationale behind key decisions.
-
-## Overview
-
-The test suite provides automated verification of the extension's core functionality without manual testing. Tests use real ACP agents (ElizACP) over actual protocol connections, providing end-to-end validation.
+This chapter documents the testing framework architecture for the VSCode extension, explaining how tests are structured and how to extend the testing system with new capabilities.
 
 ## Architecture
 
 ### Test Infrastructure
 
-The test suite uses `@vscode/test-cli` which:
-- Downloads and runs a VSCode instance
-- Loads the extension in development mode
-- Executes Mocha tests in the extension host context
+The test suite uses `@vscode/test-cli` which downloads and runs a VSCode instance, loads the extension in development mode, and executes Mocha tests in the extension host context.
 
 Configuration in `.vscode-test.mjs`:
 ```javascript
@@ -25,158 +18,157 @@ Configuration in `.vscode-test.mjs`:
 }
 ```
 
-### Testing API
+Tests run with:
+```bash
+npm test
+```
 
-Rather than coupling tests to implementation details, we expose a clean testing API through VSCode commands:
+### Testing API Design
 
-**Test Commands:**
-- `symposium.test.simulateNewTab` - Create a tab
-- `symposium.test.getTabs` - Get list of tab IDs
-- `symposium.test.sendPrompt` - Send a prompt to a tab
-- `symposium.test.startCapturingResponses` - Begin capturing agent responses
-- `symposium.test.getResponse` - Get accumulated responses
-- `symposium.test.stopCapturingResponses` - Stop capturing
+Rather than coupling tests to implementation details, the extension exposes a command-based testing API. Tests invoke VSCode commands which delegate to public testing methods on `ChatViewProvider`.
 
-These commands are thin wrappers around `ChatViewProvider` methods:
-- `simulateWebviewMessage(message)` - Trigger message handlers
-- `getTabsForTesting()` - Inspect tab state
-- `startCapturingResponses(tabId)` - Enable response capture
-- `getResponse(tabId)` - Retrieve captured text
-- `stopCapturingResponses(tabId)` - Disable capture
-
-### Structured Logging
-
-Tests verify behavior through structured log events rather than console output scraping.
-
-**Logger Infrastructure:**
-The `Logger` class provides:
-- **Output Channel** - Logs visible in VSCode Output panel
-- **Event Emitter** - Testable events with structured data
-- **Categories** - Namespace for different subsystems (webview, agent)
-
-Example log event:
+**Pattern:**
 ```typescript
-{
-  timestamp: Date,
-  level: "info" | "warn" | "error",
-  category: "agent",
-  message: "Agent session created",
-  data: {
-    tabId: "tab-1",
-    agentSessionId: "uuid...",
-    agentName: "ElizACP",
-    components: ["symposium-acp"]
+// In extension.ts - register test command
+context.subscriptions.push(
+  vscode.commands.registerCommand("symposium.test.commandName", 
+    async (arg1, arg2) => {
+      return await chatProvider.testingMethod(arg1, arg2);
+    }
+  )
+);
+
+// In test - invoke via command
+const result = await vscode.commands.executeCommand(
+  "symposium.test.commandName", 
+  arg1, 
+  arg2
+);
+```
+
+**Current Testing Commands:**
+- `symposium.test.simulateNewTab(tabId)` - Create a tab
+- `symposium.test.getTabs()` - Get list of tab IDs
+- `symposium.test.sendPrompt(tabId, prompt)` - Send prompt to tab
+- `symposium.test.startCapturingResponses(tabId)` - Begin capturing agent responses
+- `symposium.test.getResponse(tabId)` - Get accumulated response text
+- `symposium.test.stopCapturingResponses(tabId)` - Stop capturing
+
+### Adding New Test Commands
+
+To test new behavior:
+
+1. **Add public method to `ChatViewProvider`** (or relevant class):
+```typescript
+export class ChatViewProvider {
+  // Existing test methods...
+  
+  public async newTestingMethod(param: string): Promise<ResultType> {
+    // Implementation that exposes needed behavior
+    return result;
   }
 }
 ```
 
-Tests capture and assert on events:
+2. **Register command in `extension.ts`**:
+```typescript
+context.subscriptions.push(
+  vscode.commands.registerCommand(
+    "symposium.test.newCommand",
+    async (param: string) => {
+      return await chatProvider.newTestingMethod(param);
+    }
+  )
+);
+```
+
+3. **Use in tests**:
+```typescript
+test("Should test new behavior", async () => {
+  const result = await vscode.commands.executeCommand(
+    "symposium.test.newCommand",
+    "test-param"
+  );
+  assert.strictEqual(result.expected, true);
+});
+```
+
+### Structured Logging for Assertions
+
+Tests verify behavior through structured log events rather than console scraping.
+
+**Logger Architecture:**
+```typescript
+export class Logger {
+  private outputChannel: vscode.OutputChannel;
+  private eventEmitter = new vscode.EventEmitter<LogEvent>();
+  
+  public get onLog(): vscode.Event<LogEvent> {
+    return this.eventEmitter.event;
+  }
+  
+  public info(category: string, message: string, data?: any): void {
+    const event: LogEvent = { 
+      timestamp: new Date(), 
+      level: "info", 
+      category, 
+      message, 
+      data 
+    };
+    this.eventEmitter.fire(event);
+    this.outputChannel.appendLine(/* formatted output */);
+  }
+}
+```
+
+**Dual Purpose:**
+- **Testing** - Event emitter allows tests to capture and assert on events
+- **Live Debugging** - Output channel shows logs in VSCode Output panel
+
+**Usage in Tests:**
 ```typescript
 const logEvents: LogEvent[] = [];
 const disposable = logger.onLog((event) => logEvents.push(event));
 
-// ... test actions ...
+// ... perform test actions ...
 
-const agentSpawned = logEvents.filter(
-  e => e.category === "agent" && e.message === "Spawning new agent actor"
+const relevantEvents = logEvents.filter(
+  e => e.category === "agent" && e.message === "Session created"
 );
-assert.strictEqual(agentSpawned.length, 1);
+assert.strictEqual(relevantEvents.length, 2);
 ```
 
-## Test Suites
+### Adding New Log Points
 
-### Extension Activation Tests
+To make behavior testable:
 
-Basic sanity checks that the extension loads:
+1. **Add log statement in implementation**:
 ```typescript
-test("Extension should be present", async () => {
-  const extension = vscode.extensions.getExtension("symposium.symposium");
-  assert.ok(extension);
-});
-
-test("Extension should activate", async () => {
-  await extension.activate();
-  assert.strictEqual(extension.isActive, true);
+logger.info("category", "Descriptive message", {
+  relevantData: value,
+  moreContext: other
 });
 ```
 
-### Webview Lifecycle Test
-
-Verifies state persistence across webview hide/show cycles:
-
-**Setup:**
-1. Activate extension and open chat view
-2. Create a tab (triggers agent spawn and session creation)
-3. Verify tab exists
-
-**Hide/Show Cycle:**
-1. Switch to Explorer view (hides chat, may dispose webview)
-2. Switch back to chat view (shows chat, may recreate webview)
-3. Verify tab still exists
-
-**Assertions:**
-- Tab persists across hide/show
-- Webview hidden/visible events fire
-- Agent not respawned (reused)
-- Exactly one session created
-
-This test validates the message queue replay mechanism that preserves state when webviews are recreated.
-
-### Conversation Test
-
-End-to-end test of the ACP protocol flow:
-
-**Flow:**
-1. Create tab → spawns ElizACP agent
-2. Start capturing responses
-3. Send prompt: "Hello, how are you?"
-4. Wait for response
-5. Verify response received
-
-**Assertions:**
-- Response length > 0
-- Response content is relevant
-- Prompt received and sent events logged
-- Agent spawned or reused
-
-**Example Response:**
-```
-ElizACP response: Hello. How are you feeling today?
+2. **Filter and assert in tests**:
+```typescript
+const events = logEvents.filter(
+  e => e.category === "category" && e.message === "Descriptive message"
+);
+assert.ok(events.length > 0);
+assert.strictEqual(events[0].data.relevantData, expectedValue);
 ```
 
-### Multi-Tab Test
-
-Validates conversation isolation and session management:
-
-**Scenario:**
-1. Create tab 1 → new agent session
-2. Create tab 2 → new session, same agent actor
-3. Send "What is your name?" to tab 1
-4. Send "Tell me about yourself." to tab 2
-5. Send "How are you?" to tab 1
-6. Verify responses
-
-**Assertions:**
-- 2 separate agent sessions created
-- Session IDs are different
-- Agent actor reused (spawned once)
-- 3 prompts handled correctly
-- Responses are independent per tab
-- Tab 1 response contains both answers
-
-**Verification of Agent Reuse:**
-```
-[agent] Spawning new agent actor { ... }
-[agent] Reusing existing agent actor { ... }
-```
-
-This proves the `AgentConfiguration → AcpAgentActor` mapping works correctly.
+**Log Categories:**
+- `webview` - Webview lifecycle events
+- `agent` - Agent spawning, sessions, communication
+- Add new categories as needed for different subsystems
 
 ## Design Decisions
 
-### Why Message-Based Testing?
+### Command-Based Testing API
 
-**Alternative Considered:** Direct access to ChatViewProvider internals
+**Alternative:** Direct access to `ChatViewProvider` internals from tests
 
 **Chosen:** Command-based testing API
 
@@ -184,72 +176,82 @@ This proves the `AgentConfiguration → AcpAgentActor` mapping works correctly.
 - Decouples tests from implementation details
 - Tests the same code paths as real usage
 - Allows refactoring without breaking tests
-- Commands are self-documenting
+- Commands document the testing interface
 
-### Why Real Agents?
+### Real Agents vs Mocks
 
-**Alternative Considered:** Mock agent responses
+**Alternative:** Mock agent responses with canned data
 
 **Chosen:** Real ElizACP over ACP protocol
 
 **Rationale:**
-- Tests the full protocol stack
+- Tests the full protocol stack (JSON-RPC, stdio, conductor)
 - Verifies conductor integration
 - Catches protocol-level bugs
 - Provides realistic timing and behavior
 
-ElizACP is:
-- Lightweight and deterministic
-- Fast (responds in ~1-2 seconds)
-- Reliable for testing
+ElizACP is lightweight, deterministic, and fast enough for testing.
 
-### Why Structured Logging?
+### Event-Based Logging
 
-**Alternative Considered:** Console output scraping with regex
+**Alternative:** Console output scraping with regex
 
-**Chosen:** Event-based logging with structured data
+**Chosen:** Event emitter with structured data
 
 **Rationale:**
-- Enables precise assertions on event counts
+- Enables precise assertions on event counts and data
 - Provides rich context for debugging
 - Output panel visibility for live debugging
 - No brittle string matching
+- Same infrastructure serves testing and development
 
-### Test Isolation Strategy
+### Test Isolation
 
-**Problem:** Tests share VSCode instance, agent processes persist
+**Challenge:** Tests share VSCode instance, agent processes persist across tests
 
-**Solution:** Tests are order-independent:
+**Strategy:** Make tests order-independent:
 - Assert "spawned OR reused" rather than exact counts
-- Focus on test-specific events (hide/show, prompts)
-- Capture logs starting from test, not globally
+- Focus on test-specific events (e.g., prompts sent, responses received)
+- Capture logs from test start, not globally
+- Don't assume clean state between tests
 
-This allows tests to pass regardless of execution order.
+This allows the test suite to pass regardless of execution order.
 
-## Running Tests
+## Writing Tests
 
-```bash
-npm test
+Tests live in `src/test/*.test.ts` and use Mocha's TDD interface:
+
+```typescript
+suite("Feature Tests", () => {
+  test("Should do something", async function() {
+    this.timeout(20000); // Extend timeout for async operations
+    
+    // Setup log capture
+    const logEvents: LogEvent[] = [];
+    const disposable = logger.onLog((event) => logEvents.push(event));
+    
+    // Perform test actions via commands
+    await vscode.commands.executeCommand("symposium.test.doSomething");
+    
+    // Wait for async completion
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    
+    // Assert on results
+    const events = logEvents.filter(/* ... */);
+    assert.ok(events.length > 0);
+    
+    disposable.dispose();
+  });
+});
 ```
 
-Output shows:
-- Test results (passing/failing)
-- Log events from extension
-- Agent communication logs
-- Summary statistics per test
-
-## Future Improvements
-
-Potential enhancements to the testing framework:
-
-1. **Test Fixtures** - Pre-configured agent states
-2. **Snapshot Testing** - Verify full conversation flows
-3. **Performance Tests** - Measure agent spawn time, response latency
-4. **Error Injection** - Test failure scenarios (agent crash, timeout)
-5. **WebdriverIO Integration** - Test actual webview UI interactions
+**Key Patterns:**
+- Use `async function()` (not arrow functions) to access `this.timeout()`
+- Extend timeout for operations involving agent spawning
+- Always dispose log listeners
+- Add delays for async operations (agent responses, UI updates)
 
 ## Related Documentation
 
-- [Testing Guide](./testing.md) - Comprehensive guide to VSCode extension testing
-- [Message Protocol](./message-protocol.md) - Details on extension ↔ webview communication
+- [Message Protocol](./message-protocol.md) - Extension ↔ webview communication
 - [State Persistence](./state-persistence.md) - How state survives webview lifecycle
