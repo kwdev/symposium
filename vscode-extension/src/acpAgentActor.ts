@@ -8,6 +8,8 @@
 import { spawn, ChildProcess } from "child_process";
 import { Writable, Readable } from "stream";
 import * as acp from "@agentclientprotocol/sdk";
+import * as vscode from "vscode";
+import { AgentConfiguration } from "./agentConfiguration";
 
 /**
  * Callback interface for agent events
@@ -111,18 +113,49 @@ export class AcpAgentActor {
   /**
    * Initialize the ACP connection by spawning the agent process
    */
-  async initialize(
-    agentCommand: string = "elizacp",
-    agentArgs: string[] = [],
-    agentEnv?: Record<string, string>,
-  ): Promise<void> {
-    console.log(`Spawning ACP agent: ${agentCommand} ${agentArgs.join(" ")}`);
+  async initialize(config: AgentConfiguration): Promise<void> {
+    // Read settings to build the command
+    const vsConfig = vscode.workspace.getConfiguration("symposium");
+
+    // Get conductor command
+    const conductorCommand = vsConfig.get<string>(
+      "conductor",
+      "sacp-conductor",
+    );
+
+    // Get the agent definition
+    const agents = vsConfig.get<
+      Record<
+        string,
+        { command: string; args?: string[]; env?: Record<string, string> }
+      >
+    >("agents", {});
+    const agent = agents[config.agentName];
+
+    if (!agent) {
+      throw new Error(
+        `Agent "${config.agentName}" not found in configured agents`,
+      );
+    }
+
+    // Build the agent command string (command + args)
+    const agentCmd = agent.command;
+    const agentArgs = agent.args || [];
+    const agentCommandStr =
+      agentArgs.length > 0 ? `${agentCmd} ${agentArgs.join(" ")}` : agentCmd;
+
+    // Build conductor arguments: agent <component1> <component2> ... <agent-command>
+    const conductorArgs = ["agent", ...config.components, agentCommandStr];
+
+    console.log(
+      `Spawning ACP agent: ${conductorCommand} ${conductorArgs.join(" ")}`,
+    );
 
     // Merge environment variables
-    const env = agentEnv ? { ...process.env, ...agentEnv } : process.env;
+    const env = agent.env ? { ...process.env, ...agent.env } : process.env;
 
     // Spawn the agent process
-    this.agentProcess = spawn(agentCommand, agentArgs, {
+    this.agentProcess = spawn(conductorCommand, conductorArgs, {
       stdio: ["pipe", "pipe", "inherit"],
       env: env as NodeJS.ProcessEnv,
     });

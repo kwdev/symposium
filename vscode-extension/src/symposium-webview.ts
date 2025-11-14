@@ -185,6 +185,11 @@ window.addEventListener("message", (event: MessageEvent) => {
     // Clear accumulated response and message ID
     delete tabAgentResponses[message.tabId];
     delete tabCurrentMessageId[message.tabId];
+  } else if (message.type === "set-tab-title") {
+    // Update the tab title
+    mynahUI.updateStore(message.tabId, {
+      tabTitle: message.title,
+    });
   }
 
   // Update lastSeenIndex and save state

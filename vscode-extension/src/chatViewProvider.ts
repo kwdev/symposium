@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { AcpAgentActor } from "./acpAgentActor";
+import { AgentConfiguration } from "./agentConfiguration";
 
 interface IndexedMessage {
   index: number;
@@ -11,7 +12,8 @@ interface IndexedMessage {
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = "symposium.chatView";
   #view?: vscode.WebviewView;
-  #agent: AcpAgentActor;
+  #configToActor: Map<string, AcpAgentActor> = new Map(); // config.key() → AcpAgentActor
+  #tabToConfig: Map<string, AgentConfiguration> = new Map(); // tabId → AgentConfiguration
   #tabToAgentSession: Map<string, string> = new Map(); // tabId → agentSessionId
   #agentSessionToTab: Map<string, string> = new Map(); // agentSessionId → tabId
   #messageQueues: Map<string, IndexedMessage[]> = new Map(); // tabId → queue of unacked messages
@@ -26,9 +28,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   ) {
     this.#extensionUri = extensionUri;
     this.#extensionActivationId = extensionActivationId;
+  }
 
-    // Create agent with callbacks
-    this.#agent = new AcpAgentActor({
+  /**
+   * Get or create an ACP actor for the given configuration.
+   * Actors are shared across tabs with the same configuration.
+   */
+  async #getOrCreateActor(config: AgentConfiguration): Promise<AcpAgentActor> {
+    const key = config.key();
+
+    // Return existing actor if we have one for this config
+    const existing = this.#configToActor.get(key);
+    if (existing) {
+      return existing;
+    }
+
+    // Create a new actor with callbacks
+    const actor = new AcpAgentActor({
       onAgentText: (agentSessionId, text) => {
         const tabId = this.#agentSessionToTab.get(agentSessionId);
         if (tabId) {
@@ -50,70 +66,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       },
     });
 
-    // Get configuration from settings
-    const config = vscode.workspace.getConfiguration("symposium");
+    // Initialize the actor
+    await actor.initialize(config);
 
-    // Get conductor command
-    const conductorCommand = config.get<string>("conductor", "sacp-conductor");
+    // Store it in the map
+    this.#configToActor.set(key, actor);
 
-    // Get components
-    const components = config.get<
-      Record<string, { command: string; args?: string[]; disabled?: boolean }>
-    >("components", {
-      "symposium-acp": { command: "symposium-acp", args: [] },
-    });
-
-    // Get enabled components (where disabled !== true)
-    const enabledComponents = Object.entries(components)
-      .filter(([_, component]) => !component.disabled)
-      .map(([_, component]) => {
-        const cmd = component.command;
-        const args = component.args || [];
-        return args.length > 0 ? `${cmd} ${args.join(" ")}` : cmd;
-      });
-
-    // Get agent configuration
-    const agents = config.get<
-      Record<
-        string,
-        { command: string; args?: string[]; env?: Record<string, string> }
-      >
-    >("agents", {
-      ElizACP: { command: "elizacp", args: [], env: {} },
-    });
-    const currentAgentName = config.get<string>("currentAgent", "ElizACP");
-
-    // Find the current agent configuration
-    const currentAgent = agents[currentAgentName];
-    if (!currentAgent) {
-      vscode.window.showErrorMessage(
-        `Agent "${currentAgentName}" not found in configured agents`,
-      );
-      return;
-    }
-
-    // Build the agent command string (command + args)
-    const agentCmd = currentAgent.command;
-    const agentArgs = currentAgent.args || [];
-    const agentCommandStr =
-      agentArgs.length > 0 ? `${agentCmd} ${agentArgs.join(" ")}` : agentCmd;
-
-    // Build conductor arguments: agent <component1> <component2> ... <agent-command>
-    const conductorArgs = ["agent", ...enabledComponents, agentCommandStr];
-
-    console.log(
-      `Initializing conductor: ${conductorCommand} ${conductorArgs.join(" ")}`,
-    );
-
-    // Initialize the ACP connection with conductor
-    this.#agent
-      .initialize(conductorCommand, conductorArgs, currentAgent.env)
-      .catch((err) => {
-        console.error("Failed to initialize ACP agent:", err);
-        vscode.window.showErrorMessage(
-          `Failed to initialize agent: ${err.message}`,
-        );
-      });
+    return actor;
   }
 
   public resolveWebviewView(
@@ -146,8 +105,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       switch (message.type) {
         case "new-tab":
           try {
+            // Get the current agent configuration from settings
+            const config = AgentConfiguration.fromSettings();
+
+            // Get or create an actor for this configuration
+            const actor = await this.#getOrCreateActor(config);
+
+            // Store the configuration for this tab
+            this.#tabToConfig.set(message.tabId, config);
+
             // Create a new agent session for this tab
-            const agentSessionId = await this.#agent.createSession();
+            const agentSessionId = await actor.createSession();
             this.#tabToAgentSession.set(message.tabId, agentSessionId);
             this.#agentSessionToTab.set(agentSessionId, message.tabId);
 
@@ -155,8 +123,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             this.#messageQueues.set(message.tabId, []);
             this.#nextMessageIndex.set(message.tabId, 0);
 
+            // Update tab title to show which agent is being used
+            this.#sendToWebview({
+              type: "set-tab-title",
+              tabId: message.tabId,
+              title: config.describe(),
+            });
+
             console.log(
-              `Created agent session ${agentSessionId} for tab ${message.tabId}`,
+              `Created agent session ${agentSessionId} for tab ${message.tabId} using ${config.describe()}`,
             );
           } catch (err) {
             console.error("Failed to create agent session:", err);
@@ -178,11 +153,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             return;
           }
 
+          // Get the configuration and actor for this tab
+          const tabConfig = this.#tabToConfig.get(message.tabId);
+          if (!tabConfig) {
+            console.error(`No configuration found for tab ${message.tabId}`);
+            return;
+          }
+
+          const tabActor = this.#configToActor.get(tabConfig.key());
+          if (!tabActor) {
+            console.error(
+              `No actor found for configuration ${tabConfig.key()}`,
+            );
+            return;
+          }
+
           console.log(`Sending prompt to agent session ${agentSessionId}`);
 
           // Send prompt to agent (responses come via callbacks)
           try {
-            await this.#agent.sendPrompt(agentSessionId, message.prompt);
+            await tabActor.sendPrompt(agentSessionId, message.prompt);
           } catch (err) {
             console.error("Failed to send prompt:", err);
             // TODO: Send error message to webview
@@ -306,6 +296,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   dispose() {
-    this.#agent.dispose();
+    // Dispose all actors
+    for (const actor of this.#configToActor.values()) {
+      actor.dispose();
+    }
+    this.#configToActor.clear();
   }
 }

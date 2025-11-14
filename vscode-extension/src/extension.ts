@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { ChatViewProvider } from "./chatViewProvider";
+import { SettingsViewProvider } from "./settingsViewProvider";
 import { v4 as uuidv4 } from "uuid";
 
 export function activate(context: vscode.ExtensionContext) {
@@ -9,8 +10,8 @@ export function activate(context: vscode.ExtensionContext) {
   const extensionActivationId = uuidv4();
   console.log(`Generated extension activation ID: ${extensionActivationId}`);
 
-  // Register the webview view provider
-  const provider = new ChatViewProvider(
+  // Register the chat webview view provider
+  const chatProvider = new ChatViewProvider(
     context.extensionUri,
     context,
     extensionActivationId,
@@ -18,7 +19,16 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(
       ChatViewProvider.viewType,
-      provider,
+      chatProvider,
+    ),
+  );
+
+  // Register the settings webview view provider
+  const settingsProvider = new SettingsViewProvider(context.extensionUri);
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(
+      SettingsViewProvider.viewType,
+      settingsProvider,
     ),
   );
 

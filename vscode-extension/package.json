@@ -145,6 +145,11 @@
           "type": "webview",
           "id": "symposium.chatView",
           "name": "Chat"
+        },
+        {
+          "type": "webview",
+          "id": "symposium.settingsView",
+          "name": "Settings"
         }
       ]
     }
