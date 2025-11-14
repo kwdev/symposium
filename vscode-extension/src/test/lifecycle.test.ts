@@ -34,11 +34,10 @@ suite("Webview Lifecycle Tests", () => {
     console.log(`Tabs after creation: ${tabs}`);
     assert.ok(tabs.includes("test-tab-1"), "Tab should exist after creation");
 
-    // Close the view by focusing something else
-    // We'll use the settings view as a way to "close" the chat view
-    console.log("Hiding chat view...");
-    await vscode.commands.executeCommand("symposium.settingsView.focus");
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    // Close the view by switching to Explorer (this should dispose the webview)
+    console.log("Hiding chat view by switching to Explorer...");
+    await vscode.commands.executeCommand("workbench.view.explorer");
+    await new Promise((resolve) => setTimeout(resolve, 1000));
 
     // Reopen the chat view
     console.log("Reopening chat view...");
