@@ -19,7 +19,12 @@
 
 - [Overview](./design/implementation-overview.md)
 - [Components](./design/components.md)
-- [VSCode Extension](./design/vscode-extension.md)
+- [VSCode Extension](./design/vscode-extension/architecture.md)
+    - [Architecture](./design/vscode-extension/architecture.md)
+    - [Message Protocol](./design/vscode-extension/message-protocol.md)
+    - [State Persistence](./design/vscode-extension/state-persistence.md)
+    - [Webview Lifecycle](./design/vscode-extension/webview-lifecycle.md)
+    - [Implementation Status](./design/vscode-extension/implementation-status.md)
 
 # References
 
@@ -29,6 +34,7 @@
     you might want.
 -->
 
+- [VSCode Webview Lifecycle](./references/vscode-webview-lifecycle.md)
 - [Language Server Protocol Overview](./research/lsp-overview/README.md)
     - [Base Protocol](./research/lsp-overview/base-protocol.md)
     - [Language Features](./research/lsp-overview/language-features.md)
