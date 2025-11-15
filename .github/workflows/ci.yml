@@ -79,6 +79,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+            ~/.cargo/bin/
+          key: ${{ runner.os }}-cargo-vscode-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-vscode-
+            ${{ runner.os }}-cargo-
+
+      - name: Install ACP tools
+        run: |
+          cargo install elizacp
+          cargo install sacp-conductor
+          cargo install --path src/symposium-acp
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
