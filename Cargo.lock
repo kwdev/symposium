@@ -2664,10 +2664,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "home",
  "serde",
  "serde_json",
- "symposium-cli-agent-util",
  "which 6.0.3",
 ]
 
