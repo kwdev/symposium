@@ -24,7 +24,7 @@ pub struct ResearchRequest {
     /// Research prompt describing what information is needed
     pub prompt: String,
     /// Channel to send the research findings back
-    pub response_tx: oneshot::Sender<String>,
+    pub response_tx: oneshot::Sender<serde_json::Value>,
 }
 
 /// Parameters for the rust_crate_query tool
@@ -106,7 +106,7 @@ impl CrateQueryService {
 
         tracing::info!("Research complete for '{}'", crate_name);
 
-        Ok(CallToolResult::success(vec![Content::text(response)]))
+        Ok(CallToolResult::structured(response))
     }
 }
 

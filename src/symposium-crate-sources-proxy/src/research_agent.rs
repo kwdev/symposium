@@ -14,7 +14,7 @@ use sacp::{
 };
 use sacp_proxy::McpServiceRegistry;
 use sacp_rmcp::McpServiceRegistryRmcpExt;
-use std::sync::Arc;
+use std::{pin::pin, sync::Arc};
 use tokio::sync::mpsc;
 
 /// Run a research agent to investigate a Rust crate.
@@ -64,68 +64,47 @@ pub async fn run(
     // Register this session_id in shared state so the main loop knows it's a research session
     state.register_session(&session_id);
 
-    // Send the research prompt to the sub-agent
-    let prompt_request = PromptRequest {
-        session_id: session_id.clone(),
-        prompt: vec![request.prompt.clone().into()],
-        meta: None,
-    };
-
-    // Send the prompt request in a separate task and wait for responses concurrently
-    let mut prompt_handle = tokio::spawn({
-        let cx = cx.clone();
-        async move { cx.send_request(prompt_request).block_task().await }
-    });
-
-    // Accumulate responses from return_response_to_user calls
-    let mut responses = Vec::new();
-
-    // Wait for responses until the prompt completes
-    loop {
-        tokio::select! {
-            // Receive responses from return_response_to_user
-            Some(response) = response_rx.recv() => {
-                tracing::debug!("Received response from sub-agent");
+    let mut responses = vec![];
+    let (result, _) = futures::future::select(
+        // Collect responses from the response channel
+        pin!(async {
+            while let Some(response) = response_rx.recv().await {
                 responses.push(response);
             }
-            // Prompt completed
-            result = &mut prompt_handle => {
-                let prompt_response = result
-                    .map_err(|_| sacp::Error::internal_error())?;
-                let PromptResponse { stop_reason, meta: _ } = prompt_response?;
-                tracing::info!(
-                    "Research complete for session {} (stop_reason: {:?}, {} responses)",
-                    session_id,
-                    stop_reason,
-                    responses.len()
-                );
-                break;
-            }
-        }
-    }
+            Ok::<(), sacp::Error>(())
+        }),
+        pin!(async {
+            let prompt_request = PromptRequest {
+                session_id: session_id.clone(),
+                prompt: vec![request.prompt.clone().into()],
+                meta: None,
+            };
+
+            let PromptResponse {
+                stop_reason,
+                meta: _,
+            } = cx.send_request(prompt_request).block_task().await?;
+
+            tracing::info!("Research complete for session {session_id} ({stop_reason:?})",);
+
+            Ok::<(), sacp::Error>(())
+        }),
+    )
+    .await
+    .factor_first();
+    result?;
 
     // Unregister the session now that research is complete
     state.unregister_session(&session_id);
 
-    // Format and send the accumulated responses
-    let final_response = if responses.is_empty() {
-        format!(
-            "Research completed for crate '{}' but no responses were returned.",
-            request.crate_name
-        )
-    } else if responses.len() == 1 {
-        serde_json::to_string_pretty(&responses[0])
-            .unwrap_or_else(|_| format!("{:?}", responses[0]))
-    } else {
-        serde_json::to_string_pretty(&serde_json::json!({
-            "responses": responses
-        }))
-        .unwrap_or_else(|_| format!("{:?}", responses))
-    };
-
+    // Send back the accumulated responses
     request
         .response_tx
-        .send(final_response)
+        .send(if responses.len() == 1 {
+            responses.pop().expect("singleton")
+        } else {
+            serde_json::Value::Array(responses)
+        })
         .map_err(|_| sacp::Error::internal_error())?;
 
     Ok(())
