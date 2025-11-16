@@ -62,42 +62,41 @@ impl Component for CrateSourcesProxy {
                 user_facing::CrateQueryService::new(research_tx_clone.clone())
             })?;
 
-        // Spawn background task to handle research requests
-        tokio::spawn(async move {
-            tracing::info!("Research request handler started");
-
-            while let Some(request) = research_rx.recv().await {
-                tracing::info!(
-                    "Received research request for crate '{}' version {:?}",
-                    request.crate_name,
-                    request.crate_version
-                );
-                tracing::debug!("Research prompt: {}", request.prompt);
-
-                // TODO: Implementation steps:
-                // 1. Send NewSessionRequest with sub-agent MCP server
-                // 2. Get session_id back
-                // 3. Store session_id → request.response_tx in shared state
-                // 4. Send PromptRequest(session_id, request.prompt)
-                // 5. Wait for sub-agent to call return_response_to_user
-
-                // Placeholder: immediately send a response
-                let placeholder_response = format!(
-                    "Research request received for '{}'. Session spawning not yet implemented.",
-                    request.crate_name
-                );
-
-                if let Err(_) = request.response_tx.send(placeholder_response) {
-                    tracing::error!("Failed to send response - receiver dropped");
-                }
-            }
-
-            tracing::info!("Research request handler shutting down");
-        });
-
         sacp::JrHandlerChain::new()
             .name("rust-crate-sources-proxy")
             .provide_mcp(mcp_registry)
+            .with_spawned(|cx| async move {
+                tracing::info!("Research request handler started");
+
+                while let Some(request) = research_rx.recv().await {
+                    tracing::info!(
+                        "Received research request for crate '{}' version {:?}",
+                        request.crate_name,
+                        request.crate_version
+                    );
+                    tracing::debug!("Research prompt: {}", request.prompt);
+
+                    // TODO: Implementation steps:
+                    // 1. Send NewSessionRequest with sub-agent MCP server
+                    // 2. Get session_id back
+                    // 3. Store session_id → request.response_tx in shared state
+                    // 4. Send PromptRequest(session_id, request.prompt)
+                    // 5. Wait for sub-agent to call return_response_to_user
+
+                    // Placeholder: immediately send a response
+                    let placeholder_response = format!(
+                        "Research request received for '{}'. Session spawning not yet implemented.",
+                        request.crate_name
+                    );
+
+                    if let Err(_) = request.response_tx.send(placeholder_response) {
+                        tracing::error!("Failed to send response - receiver dropped");
+                    }
+                }
+
+                tracing::info!("Research request handler shutting down");
+                Ok(())
+            })
             .proxy()
             .connect_to(client)?
             .serve()
