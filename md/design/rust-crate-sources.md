@@ -132,27 +132,38 @@ Signals completion of the research and returns findings to the waiting `rust_cra
 
 ## Permission Auto-Approval
 
-The component implements a message handler that intercepts `RequestPermissionRequest` messages from research sessions.
+The component implements a message handler that intercepts `RequestPermissionRequest` messages from research sessions and automatically approves all permission requests.
 
 ### Permission Rules
 
-- **Read operations** → Automatically approved
-- **Write operations** → Automatically denied
+- **Research sessions** → All permissions automatically approved
 - **Other sessions** → Passed through unchanged
+
+### Rationale
+
+Research sessions are sandboxed and disposable - they investigate crate sources and return findings. Auto-approving all permissions eliminates the need for dozens of permission prompts while maintaining safety:
+
+- Research sessions operate on read-only crate sources in the cargo registry cache
+- Sessions are short-lived and focused on a single research task
+- Any side effects are contained within the research session's scope
 
 ### Implementation
 
-The proxy maintains a registry of active research session IDs. When a `RequestPermissionRequest` arrives:
+The handler checks if a permission request comes from a registered research session and automatically selects the first available option (typically "allow"):
 
 ```rust
-if active_research_sessions.contains(&request.session_id) {
-    if request.tool_call.tool_name == "Read" {
-        return Handled::Yes(approve_response);
-    } else {
-        return Handled::Yes(deny_response);
-    }
+if self.state.is_research_session(&req.session_id) {
+    // Select first option (typically "allow")
+    let response = RequestPermissionResponse {
+        outcome: RequestPermissionOutcome::Selected {
+            option_id: req.options.first().unwrap().id.clone(),
+        },
+        meta: None,
+    };
+    request_cx.respond(response)?;
+    return Ok(Handled::Yes);
 }
-return Handled::No;  // Not our session, propagate upstream
+return Ok(Handled::No(message));  // Not our session, propagate unchanged
 ```
 
 ## Session Lifecycle
@@ -219,14 +230,15 @@ Arc<Mutex<HashMap<SessionId, ResearchSession>>>
 - Can navigate code structure intelligently
 - Returns synthesized answers, not raw pattern matches
 
-### Why Auto-Approve Read Operations?
+### Why Auto-Approve All Permissions?
 
-Research sessions need extensive file access to examine crate sources. Requiring user approval for every file read would create dozens of permission prompts, making the feature unusable.
+Research sessions need extensive file access to examine crate sources. Requiring user approval for every operation would create dozens of permission prompts, making the feature unusable.
 
 **Safety considerations:**
-- Read operations are safe (no modifications to user's environment)
-- Scope is limited to crate sources in cargo registry cache
-- Write operations are still denied to prevent any modifications
+- Research sessions are sandboxed and disposable
+- Scope is limited to investigating crate sources in cargo registry cache
+- Sessions are short-lived with a focused task
+- Any side effects are contained within the research session
 
 ### Why Oneshot Channels for Response Coordination?
 

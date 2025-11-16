@@ -56,6 +56,7 @@ impl Component for CrateSourcesProxy {
         sacp::JrHandlerChain::new()
             .name("rust-crate-sources-proxy")
             .provide_mcp(mcp_registry)
+            .with_handler(research_agent::PermissionAutoApprover::new(state.clone()))
             .with_spawned(|cx| async move {
                 tracing::info!("Research request handler started");
 

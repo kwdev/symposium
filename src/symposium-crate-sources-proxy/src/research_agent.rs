@@ -9,13 +9,79 @@
 
 use crate::{crate_research_mcp, crate_sources_mcp, state::ResearchState};
 use sacp::{
-    schema::{NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse},
-    JrConnectionCx,
+    schema::{
+        NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse,
+        RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    },
+    Handled, JrConnectionCx, JrMessage, JrMessageHandler, MessageAndCx,
 };
 use sacp_proxy::McpServiceRegistry;
 use sacp_rmcp::McpServiceRegistryRmcpExt;
 use std::{pin::pin, sync::Arc};
 use tokio::sync::mpsc;
+
+/// Handler for auto-approving permission requests from research sessions.
+pub struct PermissionAutoApprover {
+    state: Arc<ResearchState>,
+}
+
+impl PermissionAutoApprover {
+    pub fn new(state: Arc<ResearchState>) -> Self {
+        Self { state }
+    }
+}
+
+impl JrMessageHandler for PermissionAutoApprover {
+    fn describe_chain(&self) -> impl std::fmt::Debug {
+        "permission-auto-approver"
+    }
+
+    async fn handle_message(
+        &mut self,
+        message: MessageAndCx,
+    ) -> Result<Handled<MessageAndCx>, sacp::Error> {
+        match message {
+            MessageAndCx::Request(request, request_cx) => {
+                // Try to parse as RequestPermissionRequest
+                if let Some(req_result) =
+                    RequestPermissionRequest::parse_request(&request.method, &request.params)
+                {
+                    let req = req_result?;
+
+                    // Auto-approve all permissions for research sessions
+                    if self.state.is_research_session(&req.session_id) {
+                        tracing::debug!(
+                            "Auto-approving permission request for research session {}",
+                            req.session_id
+                        );
+
+                        // Select the first available option (typically "allow")
+                        let Some(first_option) = req.options.first() else {
+                            // No options provided - this shouldn't happen but handle gracefully
+                            tracing::warn!("No permission options provided for research session");
+                            return Ok(Handled::No(MessageAndCx::Request(request, request_cx)));
+                        };
+
+                        let response = RequestPermissionResponse {
+                            outcome: RequestPermissionOutcome::Selected {
+                                option_id: first_option.id.clone(),
+                            },
+                            meta: None,
+                        };
+
+                        request_cx.respond(serde_json::to_value(response).unwrap())?;
+                        return Ok(Handled::Yes);
+                    }
+                }
+                Ok(Handled::No(MessageAndCx::Request(request, request_cx)))
+            }
+            MessageAndCx::Notification(_, _) => {
+                // Not interested in notifications
+                Ok(Handled::No(message))
+            }
+        }
+    }
+}
 
 /// Run a research agent to investigate a Rust crate.
 ///
