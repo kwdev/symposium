@@ -49,3 +49,4 @@ clap = { version = "4.0", features = ["derive"] }
 # Setup tool dependencies
 which = "6.0"
 home = "0.5"
+fxhash = "0.2.1"

@@ -8,12 +8,17 @@ pub mod sub_agent;
 pub mod user_facing;
 
 use anyhow::Result;
+use fxhash::FxHashSet;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::*,
     tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler,
 };
-use sacp::{component::Component, JrConnectionCx};
+use sacp::{
+    component::Component,
+    schema::{NewSessionRequest, NewSessionResponse},
+    JrConnectionCx,
+};
 use sacp_proxy::{AcpProxyExt, McpServiceRegistry};
 use sacp_rmcp::McpServiceRegistryRmcpExt;
 use schemars::JsonSchema;
@@ -47,6 +52,19 @@ async fn handle_research_request(
         request.crate_name,
         request.crate_version
     );
+
+    let NewSessionResponse {
+        session_id,
+        modes: _,
+        meta: _,
+    } = cx
+        .send_request(NewSessionRequest {
+            cwd: todo!(),
+            mcp_servers: todo!(),
+            meta: todo!(),
+        })
+        .block_task()
+        .await?;
 
     // TODO: Implementation steps:
     // 1. Send NewSessionRequest with sub-agent MCP server
@@ -84,6 +102,9 @@ impl Component for CrateSourcesProxy {
                 user_facing::CrateQueryService::new(research_tx_clone.clone())
             })?;
 
+        let research_agent_mcp_registry = McpServiceRegistry::default()
+            .with_rmcp_server("rust-crate-sources", RustCrateSourcesService::new)?;
+
         sacp::JrHandlerChain::new()
             .name("rust-crate-sources-proxy")
             .provide_mcp(mcp_registry)
@@ -105,6 +126,10 @@ impl Component for CrateSourcesProxy {
             .serve()
             .await
     }
+}
+
+struct ResearchState {
+    active_research_session_ids: FxHashSet<String>,
 }
 
 /// Parameters for the get_rust_crate_source tool

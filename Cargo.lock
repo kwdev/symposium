@@ -2868,6 +2868,7 @@ dependencies = [
  "dirs",
  "flate2",
  "futures",
+ "fxhash",
  "home",
  "jsonrpcmsg",
  "regex",
