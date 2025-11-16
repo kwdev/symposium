@@ -4,6 +4,7 @@
 //! Rust crate sources via dedicated sub-agent sessions.
 
 pub mod eg;
+pub mod sub_agent;
 pub mod user_facing;
 
 use anyhow::Result;
