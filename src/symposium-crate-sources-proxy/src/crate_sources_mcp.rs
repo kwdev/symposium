@@ -14,6 +14,7 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 
 /// Parameters for the get_rust_crate_source tool
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -29,19 +30,27 @@ pub struct GetRustCrateSourceParams {
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct ReturnResponseParams {
     /// The research findings to return to the user
-    pub response: String,
+    pub response: serde_json::Value,
 }
 
-/// MCP service that provides tools for sub-agent research sessions
+/// MCP service that provides tools for sub-agent research sessions.
+///
+/// Each instance is created for a specific research session and holds a channel
+/// to send responses back to the waiting research agent.
 #[derive(Clone)]
 pub struct SubAgentService {
     tool_router: ToolRouter<SubAgentService>,
+    /// Channel for sending research responses back to the research agent.
+    /// Responses are accumulated as a vector in case the agent sends multiple.
+    response_tx: mpsc::Sender<serde_json::Value>,
 }
 
 impl SubAgentService {
-    pub fn new() -> Self {
+    /// Create a new SubAgentService instance with a response channel
+    pub fn new(response_tx: mpsc::Sender<serde_json::Value>) -> Self {
         Self {
             tool_router: Self::tool_router(),
+            response_tx,
         }
     }
 }
@@ -107,14 +116,13 @@ impl SubAgentService {
         tracing::info!("Research complete, returning response");
         tracing::debug!("Response: {}", response);
 
-        // TODO: Implementation steps:
-        // 1. Look up current session's response channel from shared state
-        // 2. Send response through the channel
-        // 3. Return success to indicate the tool completed
+        // Send the response through the channel to the waiting research agent
+        self.response_tx.send(response.clone()).await.map_err(|_| {
+            McpError::internal_error("Failed to send response: channel closed".to_string(), None)
+        })?;
 
-        // Placeholder implementation
         Ok(CallToolResult::success(vec![Content::text(
-            "Response recorded. Implementation pending.".to_string(),
+            "Response delivered to waiting agent.".to_string(),
         )]))
     }
 }

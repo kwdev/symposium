@@ -1,6 +1,7 @@
 //! Shared state for tracking active research sessions.
 
 use fxhash::FxHashSet;
+use sacp::schema::SessionId;
 use std::sync::Mutex;
 
 /// Shared state tracking active research sessions.
@@ -16,7 +17,7 @@ use std::sync::Mutex;
 pub struct ResearchState {
     /// Set of session IDs that correspond to active research requests.
     /// The main loop checks this to decide how to handle session-specific messages.
-    active_research_session_ids: Mutex<FxHashSet<String>>,
+    active_research_session_ids: Mutex<FxHashSet<SessionId>>,
 }
 
 impl ResearchState {
@@ -30,16 +31,16 @@ impl ResearchState {
     /// Register a new research session ID.
     ///
     /// Called by research_agent::run after spawning a sub-agent session.
-    pub fn register_session(&self, session_id: String) {
+    pub fn register_session(&self, session_id: &SessionId) {
         let mut sessions = self.active_research_session_ids.lock().unwrap();
-        sessions.insert(session_id);
+        sessions.insert(session_id.clone());
     }
 
     /// Check if a session ID corresponds to an active research session.
     ///
     /// Used by the main event loop to determine if special handling is needed
     /// (e.g., auto-approving Read permissions).
-    pub fn is_research_session(&self, session_id: &str) -> bool {
+    pub fn is_research_session(&self, session_id: &SessionId) -> bool {
         let sessions = self.active_research_session_ids.lock().unwrap();
         sessions.contains(session_id)
     }
@@ -47,7 +48,7 @@ impl ResearchState {
     /// Unregister a research session ID.
     ///
     /// Called by research_agent::run when the session completes or fails.
-    pub fn unregister_session(&self, session_id: &str) {
+    pub fn unregister_session(&self, session_id: &SessionId) {
         let mut sessions = self.active_research_session_ids.lock().unwrap();
         sessions.remove(session_id);
     }
