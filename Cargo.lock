@@ -2880,6 +2880,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "symposium-benchmark"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "sacp",
+ "sacp-conductor",
+ "sacp-tokio",
+ "symposium-crate-sources-proxy",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "yopo",
+]
+
+[[package]]
 name = "symposium-cli-agent-util"
 version = "0.1.0"
 dependencies = [
@@ -4003,6 +4019,17 @@ dependencies = [
  "quote",
  "syn",
  "synstructure",
+]
+
+[[package]]
+name = "yopo"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5284af15f032a52c65c42a5eab973a31bfebe34f928129e00af06f40e004157c"
+dependencies = [
+ "sacp",
+ "sacp-tokio",
+ "tokio",
 ]
 
 [[package]]
