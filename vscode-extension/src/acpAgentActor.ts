@@ -10,6 +10,7 @@ import { Writable, Readable } from "stream";
 import * as acp from "@agentclientprotocol/sdk";
 import * as vscode from "vscode";
 import { AgentConfiguration } from "./agentConfiguration";
+import { logger } from "./extension";
 
 /**
  * Callback interface for agent events
@@ -36,9 +37,10 @@ class SymposiumClient implements acp.Client {
     }
 
     // Default: auto-approve read operations, reject everything else
-    console.log(
-      `Permission requested: ${params.toolCall.title} (${params.toolCall.kind})`,
-    );
+    logger.info("approval", "Permission requested (default handler)", {
+      title: params.toolCall.title,
+      kind: params.toolCall.kind,
+    });
 
     if (params.toolCall.kind === "read") {
       const allowOption = params.options.find(
@@ -74,12 +76,16 @@ class SymposiumClient implements acp.Client {
         }
         break;
       case "tool_call":
-        console.log(`Tool call: ${update.title} (${update.status})`);
+        logger.info("agent", "Tool call", {
+          title: update.title,
+          status: update.status,
+        });
         break;
       case "tool_call_update":
-        console.log(
-          `Tool call update: ${update.toolCallId} - ${update.status}`,
-        );
+        logger.info("agent", "Tool call update", {
+          toolCallId: update.toolCallId,
+          status: update.status,
+        });
         break;
     }
   }
@@ -88,7 +94,9 @@ class SymposiumClient implements acp.Client {
     params: acp.ReadTextFileRequest,
   ): Promise<acp.ReadTextFileResponse> {
     // TODO: Implement file reading through VSCode APIs
-    console.log(`Read file requested: ${params.path}`);
+    logger.warn("fs", "Read file requested but not implemented", {
+      path: params.path,
+    });
     throw new Error("File reading not yet implemented");
   }
 
@@ -96,7 +104,9 @@ class SymposiumClient implements acp.Client {
     params: acp.WriteTextFileRequest,
   ): Promise<acp.WriteTextFileResponse> {
     // TODO: Implement file writing through VSCode APIs
-    console.log(`Write file requested: ${params.path}`);
+    logger.warn("fs", "Write file requested but not implemented", {
+      path: params.path,
+    });
     throw new Error("File writing not yet implemented");
   }
 }
@@ -147,9 +157,10 @@ export class AcpAgentActor {
     // Build conductor arguments: agent <component1> <component2> ... <agent-command>
     const conductorArgs = ["agent", ...config.components, agentCommandStr];
 
-    console.log(
-      `Spawning ACP agent: ${conductorCommand} ${conductorArgs.join(" ")}`,
-    );
+    logger.info("agent", "Spawning ACP agent", {
+      command: conductorCommand,
+      args: conductorArgs,
+    });
 
     // Merge environment variables
     const env = agent.env ? { ...process.env, ...agent.env } : process.env;
@@ -182,9 +193,9 @@ export class AcpAgentActor {
       },
     });
 
-    console.log(
-      `✅ Connected to ACP agent (protocol v${initResult.protocolVersion})`,
-    );
+    logger.info("agent", "Connected to ACP agent", {
+      protocolVersion: initResult.protocolVersion,
+    });
   }
 
   /**
@@ -203,9 +214,10 @@ export class AcpAgentActor {
       mcpServers: [],
     });
 
-    console.log(
-      `Created agent session: ${result.sessionId} (cwd: ${workspaceFolder})`,
-    );
+    logger.info("agent", "Created agent session", {
+      sessionId: result.sessionId,
+      cwd: workspaceFolder,
+    });
     return result.sessionId;
   }
 
@@ -221,7 +233,9 @@ export class AcpAgentActor {
       throw new Error("ACP connection not initialized");
     }
 
-    console.log(`Sending prompt to agent session ${agentSessionId}`);
+    logger.info("agent", "Sending prompt to agent session", {
+      agentSessionId,
+    });
 
     // Send the prompt (this will complete when agent finishes)
     const promptResult = await this.connection.prompt({
@@ -234,9 +248,9 @@ export class AcpAgentActor {
       ],
     });
 
-    console.log(
-      `Prompt completed with stop reason: ${promptResult.stopReason}`,
-    );
+    logger.info("agent", "Prompt completed", {
+      stopReason: promptResult.stopReason,
+    });
 
     // Notify completion
     this.callbacks.onAgentComplete(agentSessionId);

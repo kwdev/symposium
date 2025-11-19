@@ -295,6 +295,7 @@ function saveState() {
 // Handle messages from the extension
 window.addEventListener("message", (event: MessageEvent) => {
   const message = event.data;
+  const receiveTime = Date.now();
 
   // Check if we've already seen this message
   const currentLastSeen = lastSeenIndex[message.tabId] ?? -1;
@@ -307,14 +308,29 @@ window.addEventListener("message", (event: MessageEvent) => {
 
   // Process the message
   if (message.type === "agent-text") {
+    const extensionDelay = message.timestamp
+      ? receiveTime - message.timestamp
+      : "unknown";
+    console.log(
+      `[PERF] Webview received chunk at ${receiveTime}, extension->webview delay=${extensionDelay}ms, length=${message.text.length}`,
+    );
+
     // Append text to accumulated response
+    const appendStart = Date.now();
     tabAgentResponses[message.tabId] =
       (tabAgentResponses[message.tabId] || "") + message.text;
+    const appendEnd = Date.now();
 
     // Update the chat UI with accumulated text
+    const uiUpdateStart = Date.now();
     mynahUI.updateLastChatAnswer(message.tabId, {
       body: tabAgentResponses[message.tabId],
     });
+    const uiUpdateEnd = Date.now();
+
+    console.log(
+      `[PERF] Append: ${appendEnd - appendStart}ms, UI update: ${uiUpdateEnd - uiUpdateStart}ms, total: ${uiUpdateEnd - receiveTime}ms`,
+    );
   } else if (message.type === "agent-complete") {
     // Mark the stream as complete using the message ID
     const messageId = tabCurrentMessageId[message.tabId];

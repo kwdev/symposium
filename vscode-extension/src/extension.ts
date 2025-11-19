@@ -15,11 +15,13 @@ export function getChatProviderForTesting(): ChatViewProvider | undefined {
 }
 
 export function activate(context: vscode.ExtensionContext) {
-  console.log("Symposium extension is now active");
+  logger.info("extension", "Symposium extension is now active");
 
   // Generate extension activation ID for this VSCode session
   const extensionActivationId = uuidv4();
-  console.log(`Generated extension activation ID: ${extensionActivationId}`);
+  logger.info("extension", "Generated extension activation ID", {
+    extensionActivationId,
+  });
 
   // Register the chat webview view provider
   const chatProvider = new ChatViewProvider(

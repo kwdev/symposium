@@ -67,6 +67,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     // Create a new actor with callbacks
     const actor = new AcpAgentActor({
       onAgentText: (agentSessionId, text) => {
+        const receiveTime = Date.now();
         const tabId = this.#agentSessionToTab.get(agentSessionId);
         if (tabId) {
           // Capture for testing if enabled
@@ -74,10 +75,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             this.#testResponseCapture.get(tabId)!.push(text);
           }
 
+          logger.info("perf", "Received chunk from agent", {
+            receiveTime,
+            textLength: text.length,
+          });
           this.#sendToWebview({
             type: "agent-text",
             tabId,
             text,
+            timestamp: receiveTime,
+          });
+          const sendTime = Date.now();
+          logger.info("perf", "Sent chunk to webview", {
+            sendTime,
+            delay: sendTime - receiveTime,
           });
         }
       },
@@ -192,11 +203,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             this.#tabToAgentSession.set(message.tabId, agentSessionId);
             this.#agentSessionToTab.set(agentSessionId, message.tabId);
 
-            console.log(
-              `Created agent session ${agentSessionId} for tab ${message.tabId} using ${config.describe()}`,
-            );
+            logger.info("agent", "Created agent session", {
+              agentSessionId,
+              tabId: message.tabId,
+              config: config.describe(),
+            });
           } catch (err) {
-            console.error("Failed to create agent session:", err);
+            logger.error("agent", "Failed to create agent session", {
+              error: err,
+            });
           }
           break;
 
@@ -206,44 +221,50 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           break;
 
         case "prompt":
-          console.log(`Received prompt for tab ${message.tabId}`);
+          logger.info("agent", "Received prompt", { tabId: message.tabId });
 
           // Get the agent session for this tab
           const agentSessionId = this.#tabToAgentSession.get(message.tabId);
           if (!agentSessionId) {
-            console.error(`No agent session found for tab ${message.tabId}`);
+            logger.error("agent", "No agent session found for tab", {
+              tabId: message.tabId,
+            });
             return;
           }
 
           // Get the configuration and actor for this tab
           const tabConfig = this.#tabToConfig.get(message.tabId);
           if (!tabConfig) {
-            console.error(`No configuration found for tab ${message.tabId}`);
+            logger.error("agent", "No configuration found for tab", {
+              tabId: message.tabId,
+            });
             return;
           }
 
           const tabActor = this.#configToActor.get(tabConfig.key());
           if (!tabActor) {
-            console.error(
-              `No actor found for configuration ${tabConfig.key()}`,
-            );
+            logger.error("agent", "No actor found for configuration", {
+              configKey: tabConfig.key(),
+            });
             return;
           }
 
-          console.log(`Sending prompt to agent session ${agentSessionId}`);
+          logger.info("agent", "Sending prompt to agent", {
+            agentSessionId,
+          });
 
           // Send prompt to agent (responses come via callbacks)
           try {
             await tabActor.sendPrompt(agentSessionId, message.prompt);
           } catch (err) {
-            console.error("Failed to send prompt:", err);
+            logger.error("agent", "Failed to send prompt", { error: err });
             // TODO: Send error message to webview
           }
           break;
 
         case "webview-ready":
           // Webview is initialized and ready to receive messages
-          console.log("Webview ready - replaying queued messages");
+          logger.info("webview", "Webview ready - replaying queued messages");
           this.#replayQueuedMessages();
           break;
 
@@ -299,9 +320,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const remaining = queue.filter((msg) => msg.index > ackedIndex);
     this.#messageQueues.set(tabId, remaining);
 
-    console.log(
-      `Acked message ${ackedIndex} for tab ${tabId}, ${remaining.length} messages remain in queue`,
-    );
+    logger.info("webview", "Message acknowledged", {
+      tabId,
+      ackedIndex,
+      remainingInQueue: remaining.length,
+    });
   }
 
   async #requestUserApproval(
@@ -366,7 +389,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     // Replay all queued messages for all tabs
     for (const [tabId, queue] of this.#messageQueues.entries()) {
       for (const message of queue) {
-        console.log(`Replaying message ${message.index} for tab ${tabId}`);
+        logger.info("webview", "Replaying queued message", {
+          tabId,
+          messageIndex: message.index,
+        });
         this.#view.webview.postMessage(message);
       }
     }
@@ -379,7 +405,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     const tabId = message.tabId;
     if (!tabId) {
-      console.error("Message missing tabId:", message);
+      logger.error("webview", "Message missing tabId", { message });
       return;
     }
 
@@ -399,21 +425,27 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     // Send if webview is visible
     if (this.#view.visible) {
-      console.log(`Sending message ${index} for tab ${tabId}`);
+      logger.info("webview", "Sending message to webview", {
+        tabId,
+        messageIndex: index,
+      });
       this.#view.webview.postMessage(indexedMessage);
     } else {
-      console.log(`Queued message ${index} for tab ${tabId} (webview hidden)`);
+      logger.info("webview", "Queued message (webview hidden)", {
+        tabId,
+        messageIndex: index,
+      });
     }
   }
 
   #onWebviewVisible() {
     // Visibility change detected - webview will send "webview-ready" when initialized
-    console.log("Webview became visible");
+    logger.info("webview", "Webview became visible");
   }
 
   #onWebviewHidden() {
     // Nothing to do - messages stay queued until acked
-    console.log("Webview became hidden");
+    logger.info("webview", "Webview became hidden");
   }
 
   #getHtmlForWebview(webview: vscode.Webview) {
@@ -531,7 +563,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             components: config.components,
           });
         } catch (err) {
-          console.error("Failed to create agent session:", err);
+          logger.error("agent", "Failed to create agent session", {
+            error: err,
+          });
         }
         break;
 
