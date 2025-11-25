@@ -17,7 +17,7 @@ use sacp::{
     },
     Handled, JrMessageHandler, MessageAndCx,
 };
-use sacp_proxy::McpServiceRegistry;
+use sacp_proxy::{JrCxExt, McpServiceRegistry};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{pin::pin, sync::Arc};
@@ -212,7 +212,7 @@ The research agent will examine the crate sources and return relevant code examp
                         modes: _,
                         meta: _,
                     } = cx
-                        .send_request(research_agent_session_request(
+                        .send_request_to_successor(research_agent_session_request(
                             sub_agent_mcp_registry,
                         ).map_err(|e| anyhow::anyhow!("Failed to create session request: {}", e))?)
                         .block_task()
@@ -245,7 +245,7 @@ The research agent will examine the crate sources and return relevant code examp
                                 stop_reason,
                                 meta: _,
                             } = cx
-                                .send_request(prompt_request)
+                                .send_request_to_successor(prompt_request)
                                 .block_task()
                                 .await
                                 .map_err(|e| anyhow::anyhow!("Prompt request failed: {}", e))?;

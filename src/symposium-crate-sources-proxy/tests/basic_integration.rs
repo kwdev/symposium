@@ -43,9 +43,9 @@ async fn test_rust_crate_query_with_elizacp() -> Result<()> {
     .await?;
 
     // Verify the response matches expected output
-    // ElizACP will attempt to execute the tool but fail because it can't
-    // actually spawn the research session, so we expect an error message
-    expect![[r#"ERROR: Mcp error: -32603: Internal error("Failed to spawn research session: Method not found")"#]].assert_eq(&response);
+    // The research sub-agent session is spawned successfully. Eliza responds with
+    // a greeting, then calls the get_rust_crate_source tool which returns empty results.
+    expect![[r#"Hello. How are you feeling today?OK: CallToolResult { content: [Annotated { raw: Text(RawTextContent { text: "{\"result\":[]}", meta: None }), annotations: None }], structured_content: Some(Object {"result": Array []}), is_error: Some(false), meta: None }"#]].assert_eq(&response);
 
     Ok(())
 }
