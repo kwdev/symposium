@@ -153,7 +153,7 @@ pub fn symposium_conductor(args: &SymposiumArgs) -> Result<Conductor> {
 
             Ok((init_req, components))
         },
-        None, // No custom conductor command
+        Default::default(),
     );
 
     Ok(conductor)

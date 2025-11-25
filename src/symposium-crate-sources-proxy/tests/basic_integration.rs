@@ -36,7 +36,7 @@ async fn test_rust_crate_query_with_elizacp() -> Result<()> {
                 DynComponent::new(proxy),
                 DynComponent::new(elizacp::ElizaAgent::new()),
             ],
-            None,
+            Default::default(),
         ),
         r#"Use tool rust-crate-query::rust_crate_query with {"crate_name":"serde","prompt":"What is the signature of from_value?"}"#,
     )
@@ -45,7 +45,7 @@ async fn test_rust_crate_query_with_elizacp() -> Result<()> {
     // Verify the response matches expected output
     // ElizACP will attempt to execute the tool but fail because it can't
     // actually spawn the research session, so we expect an error message
-    expect![[r#"ERROR: connection closed: initialize response"#]].assert_eq(&response);
+    expect![[r#"ERROR: Mcp error: -32603: Internal error("Failed to spawn research session: Method not found")"#]].assert_eq(&response);
 
     Ok(())
 }

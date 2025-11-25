@@ -109,7 +109,7 @@ async fn run_benchmark(benchmark: &Benchmark, output_dir: &PathBuf) -> Result<()
         Conductor::new(
             "benchmark-conductor".to_string(),
             vec![DynComponent::new(proxy), DynComponent::new(claude_agent)],
-            None,
+            Default::default(),
         )
         .run(ByteStreams::new(
             conductor_write.compat_write(),
