@@ -41,6 +41,9 @@ export interface AcpAgentCallbacks {
  * Implementation of the ACP Client interface
  */
 class SymposiumClient implements acp.Client {
+  // Cache tool call titles since updates don't include them
+  private toolCallTitles: Map<string, string> = new Map();
+
   constructor(private callbacks: AcpAgentCallbacks) {}
 
   async requestPermission(
@@ -95,6 +98,8 @@ class SymposiumClient implements acp.Client {
           title: update.title,
           status: update.status,
         });
+        // Cache the title for later updates
+        this.toolCallTitles.set(update.toolCallId, update.title);
         if (this.callbacks.onToolCall && update.status) {
           this.callbacks.onToolCall(params.sessionId, {
             toolCallId: update.toolCallId,
@@ -106,21 +111,30 @@ class SymposiumClient implements acp.Client {
           });
         }
         break;
-      case "tool_call_update":
+      case "tool_call_update": {
+        // Look up cached title since updates don't include it
+        const cachedTitle =
+          update.title ?? this.toolCallTitles.get(update.toolCallId) ?? "";
         logger.info("agent", "Tool call update", {
           toolCallId: update.toolCallId,
+          title: cachedTitle,
           status: update.status,
         });
         if (this.callbacks.onToolCallUpdate && update.status) {
           this.callbacks.onToolCallUpdate(params.sessionId, {
             toolCallId: update.toolCallId,
-            title: update.title ?? "",
+            title: cachedTitle,
             status: update.status,
             rawInput: update.rawInput,
             rawOutput: update.rawOutput,
           });
         }
+        // Clean up cache when tool call completes
+        if (update.status === "completed" || update.status === "failed") {
+          this.toolCallTitles.delete(update.toolCallId);
+        }
         break;
+      }
     }
   }
 

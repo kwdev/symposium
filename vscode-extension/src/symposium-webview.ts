@@ -203,6 +203,18 @@ function formatToolInput(
   }
 }
 
+// Build the tool call details content
+function buildToolDetails(toolCall: ToolCallInfo): string {
+  let details = "";
+  if (toolCall.rawInput) {
+    details += "**Input:**\n" + formatToolInput(toolCall.rawInput) + "\n\n";
+  }
+  if (toolCall.rawOutput) {
+    details += "**Output:**\n" + formatToolOutput(toolCall.rawOutput);
+  }
+  return details;
+}
+
 // Handle tool call from extension
 function handleToolCall(tabId: string, toolCall: ToolCallInfo) {
   // Initialize tool tracking for this tab if needed
@@ -225,28 +237,26 @@ function handleToolCall(tabId: string, toolCall: ToolCallInfo) {
   const icon = getToolStatusIcon(toolCall.status);
   const shimmer =
     toolCall.status === "running" || toolCall.status === "pending";
+  const details = buildToolDetails(toolCall);
 
-  // Build expanded content
-  let expandedBody = "";
-  if (toolCall.rawInput) {
-    expandedBody +=
-      "**Input:**\n" + formatToolInput(toolCall.rawInput) + "\n\n";
-  }
-  if (toolCall.rawOutput) {
-    expandedBody += "**Output:**\n" + formatToolOutput(toolCall.rawOutput);
-  }
+  // Use summary to make details collapsible:
+  // - body: the collapsed view (always visible as header)
+  // - summary.content: the expanded details
+  // - summary.isCollapsed: start collapsed
+  // Escape backticks in title to prevent markdown breaking
+  const escapedTitle = toolCall.title.replace(/`/g, "\\`");
 
   mynahUI.addChatItem(tabId, {
     type: ChatItemType.ANSWER,
     messageId,
-    body: `${icon} \`${toolCall.title}\``,
     status: getToolStatus(toolCall.status),
     shimmer,
-    summary: expandedBody
+    body: `${icon} \`${escapedTitle}\``,
+    summary: details
       ? {
           isCollapsed: true,
           content: {
-            body: expandedBody,
+            body: details,
           },
         }
       : undefined,
@@ -262,26 +272,20 @@ function updateToolCallCard(
   const icon = getToolStatusIcon(toolCall.status);
   const shimmer =
     toolCall.status === "running" || toolCall.status === "pending";
+  const details = buildToolDetails(toolCall);
 
-  // Build expanded content
-  let expandedBody = "";
-  if (toolCall.rawInput) {
-    expandedBody +=
-      "**Input:**\n" + formatToolInput(toolCall.rawInput) + "\n\n";
-  }
-  if (toolCall.rawOutput) {
-    expandedBody += "**Output:**\n" + formatToolOutput(toolCall.rawOutput);
-  }
+  // Escape backticks in title to prevent markdown breaking
+  const escapedTitle = toolCall.title.replace(/`/g, "\\`");
 
   mynahUI.updateChatAnswerWithMessageId(tabId, messageId, {
-    body: `${icon} \`${toolCall.title}\``,
     status: getToolStatus(toolCall.status),
     shimmer,
-    summary: expandedBody
+    body: `${icon} \`${escapedTitle}\``,
+    summary: details
       ? {
           isCollapsed: true,
           content: {
-            body: expandedBody,
+            body: details,
           },
         }
       : undefined,
