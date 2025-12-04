@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import * as acp from "@agentclientprotocol/sdk";
 import { AcpAgentActor, ToolCallInfo, SlashCommandInfo } from "./acpAgentActor";
 import { AgentConfiguration } from "./agentConfiguration";
+import { WorkspaceFileIndex } from "./workspaceFileIndex";
 import { logger } from "./extension";
 import { v4 as uuidv4 } from "uuid";
 
@@ -35,6 +36,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   // Queue for notifications that arrive before session mapping is established
   // agentSessionId → array of pending messages to send to webview
   #pendingSessionNotifications: Map<string, any[]> = new Map();
+
+  // File index per workspace folder
+  #fileIndexes: Map<string, WorkspaceFileIndex> = new Map();
+  // Track which tabs are subscribed to which file index
+  #tabToFileIndex: Map<string, WorkspaceFileIndex> = new Map();
 
   constructor(
     extensionUri: vscode.Uri,
@@ -178,6 +184,131 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     return actor;
   }
 
+  /**
+   * Get or create a file index for the given workspace folder.
+   * File indexes are shared across tabs in the same workspace.
+   */
+  async #getOrCreateFileIndex(
+    workspaceFolder: vscode.WorkspaceFolder,
+    tabId: string,
+  ): Promise<WorkspaceFileIndex> {
+    const key = workspaceFolder.uri.fsPath;
+
+    let index = this.#fileIndexes.get(key);
+    if (!index) {
+      index = new WorkspaceFileIndex(workspaceFolder);
+      await index.initialize();
+
+      // Subscribe to changes and broadcast to all tabs using this index
+      index.onDidChange(() => {
+        this.#broadcastFileList(index!);
+      });
+
+      this.#fileIndexes.set(key, index);
+    }
+
+    // Track this tab's subscription
+    this.#tabToFileIndex.set(tabId, index);
+
+    return index;
+  }
+
+  /**
+   * Read file content for embedding in a prompt.
+   * Returns null if file cannot be read.
+   */
+  async #readFileContent(
+    filePath: string,
+    workspaceFolder: vscode.WorkspaceFolder,
+  ): Promise<{ absolutePath: string; text: string; mimeType: string } | null> {
+    // Resolve the path - could be relative to workspace or absolute
+    let absolutePath: string;
+    if (filePath.startsWith("/")) {
+      absolutePath = filePath;
+    } else {
+      absolutePath = vscode.Uri.joinPath(workspaceFolder.uri, filePath).fsPath;
+    }
+
+    try {
+      const uri = vscode.Uri.file(absolutePath);
+      const content = await vscode.workspace.fs.readFile(uri);
+      const text = new TextDecoder().decode(content);
+
+      // Determine MIME type from extension
+      const ext = filePath.split(".").pop()?.toLowerCase() || "";
+      const mimeType = this.#getMimeType(ext);
+
+      return { absolutePath, text, mimeType };
+    } catch (err) {
+      logger.error("context", "Failed to read file", {
+        path: absolutePath,
+        error: err,
+      });
+      return null;
+    }
+  }
+
+  /**
+   * Get MIME type for a file extension.
+   */
+  #getMimeType(ext: string): string {
+    const mimeTypes: Record<string, string> = {
+      ts: "text/typescript",
+      tsx: "text/typescript",
+      js: "text/javascript",
+      jsx: "text/javascript",
+      rs: "text/rust",
+      py: "text/python",
+      rb: "text/ruby",
+      go: "text/go",
+      java: "text/java",
+      c: "text/c",
+      cpp: "text/cpp",
+      h: "text/c",
+      hpp: "text/cpp",
+      md: "text/markdown",
+      json: "application/json",
+      yaml: "text/yaml",
+      yml: "text/yaml",
+      toml: "text/toml",
+      xml: "text/xml",
+      html: "text/html",
+      css: "text/css",
+      sql: "text/sql",
+      sh: "text/x-shellscript",
+      bash: "text/x-shellscript",
+      zsh: "text/x-shellscript",
+    };
+    return mimeTypes[ext] || "text/plain";
+  }
+
+  /**
+   * Send the current file list to a specific tab.
+   */
+  #sendFileListToTab(tabId: string, index: WorkspaceFileIndex): void {
+    const files = index.getFiles();
+    this.#sendToWebview({
+      type: "available-context",
+      tabId,
+      files,
+    });
+    logger.info("context", "Sent file list to tab", {
+      tabId,
+      fileCount: files.length,
+    });
+  }
+
+  /**
+   * Broadcast file list updates to all tabs subscribed to an index.
+   */
+  #broadcastFileList(index: WorkspaceFileIndex): void {
+    for (const [tabId, tabIndex] of this.#tabToFileIndex.entries()) {
+      if (tabIndex === index) {
+        this.#sendFileListToTab(tabId, index);
+      }
+    }
+  }
+
   public resolveWebviewView(
     webviewView: vscode.WebviewView,
     context: vscode.WebviewViewResolveContext,
@@ -243,6 +374,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
               message.tabId,
             );
 
+            // Set up file index and send initial file list
+            const fileIndex = await this.#getOrCreateFileIndex(
+              config.workspaceFolder,
+              message.tabId,
+            );
+            this.#sendFileListToTab(message.tabId, fileIndex);
+
             logger.info("agent", "Created agent session", {
               agentSessionId,
               tabId: message.tabId,
@@ -261,7 +399,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           break;
 
         case "prompt":
-          logger.info("agent", "Received prompt", { tabId: message.tabId });
+          logger.info("agent", "Received prompt", {
+            tabId: message.tabId,
+            contextFiles: message.contextFiles,
+          });
 
           // Get the agent session for this tab
           const agentSessionId = this.#tabToAgentSession.get(message.tabId);
@@ -289,13 +430,56 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             return;
           }
 
+          // Build content blocks for the prompt
+          const contentBlocks: acp.ContentBlock[] = [];
+
+          // Add text prompt
+          if (message.prompt) {
+            contentBlocks.push({
+              type: "text",
+              text: message.prompt,
+            });
+          }
+
+          // Add file context as EmbeddedResource blocks
+          if (message.contextFiles && Array.isArray(message.contextFiles)) {
+            for (const filePath of message.contextFiles) {
+              try {
+                const content = await this.#readFileContent(
+                  filePath,
+                  tabConfig.workspaceFolder,
+                );
+                if (content !== null) {
+                  contentBlocks.push({
+                    type: "resource",
+                    resource: {
+                      uri: `file://${content.absolutePath}`,
+                      text: content.text,
+                      mimeType: content.mimeType,
+                    },
+                  });
+                  logger.info("context", "Added file context", {
+                    path: filePath,
+                    size: content.text.length,
+                  });
+                }
+              } catch (err) {
+                logger.error("context", "Failed to read context file", {
+                  path: filePath,
+                  error: err,
+                });
+              }
+            }
+          }
+
           logger.info("agent", "Sending prompt to agent", {
             agentSessionId,
+            contentBlockCount: contentBlocks.length,
           });
 
           // Send prompt to agent (responses come via callbacks)
           try {
-            await tabActor.sendPrompt(agentSessionId, message.prompt);
+            await tabActor.sendPrompt(agentSessionId, contentBlocks);
           } catch (err: any) {
             logger.error("agent", "Failed to send prompt", { error: err });
             this.#sendToWebview({
@@ -575,6 +759,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       actor.dispose();
     }
     this.#configToActor.clear();
+
+    // Dispose all file indexes
+    for (const index of this.#fileIndexes.values()) {
+      index.dispose();
+    }
+    this.#fileIndexes.clear();
+    this.#tabToFileIndex.clear();
   }
 
   // Testing API - only use from integration tests
@@ -648,6 +839,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             agentSessionId,
             message.tabId,
           );
+
+          // Set up file index and send initial file list
+          const fileIndex = await this.#getOrCreateFileIndex(
+            config.workspaceFolder,
+            message.tabId,
+          );
+          this.#sendFileListToTab(message.tabId, fileIndex);
 
           logger.info("agent", "Agent session created", {
             tabId: message.tabId,

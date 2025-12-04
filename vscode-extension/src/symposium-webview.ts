@@ -390,6 +390,15 @@ const config: any = {
     console.log("Tab removed:", tabId);
     saveState();
   },
+  onContextSelected: (contextItem: any, tabId: string) => {
+    // User selected a file from the @ context menu
+    // The command field contains the file path
+    console.log("Context selected:", contextItem.command, "for tab:", tabId);
+
+    // Return true to let MynahUI insert the command text into the prompt
+    // The file path will be inserted as-is (user can type more after)
+    return true;
+  },
   onChatPrompt: (tabId: string, prompt: any) => {
     console.log("onChatPrompt received:", JSON.stringify(prompt, null, 2));
 
@@ -399,13 +408,34 @@ const config: any = {
       promptText = prompt.command + (promptText ? " " + promptText : "");
     }
 
-    console.log("Sending prompt text:", promptText);
+    // Extract context (file references from @ mentions)
+    // context can be string[] or QuickActionCommand[]
+    let contextFiles: string[] = [];
+    if (prompt.context && Array.isArray(prompt.context)) {
+      contextFiles = prompt.context
+        .map((item: any) => {
+          if (typeof item === "string") {
+            return item;
+          } else if (item.command) {
+            // QuickActionCommand format
+            return item.command;
+          }
+          return null;
+        })
+        .filter(Boolean);
+    }
 
-    // Send prompt to extension with tabId
+    console.log("Sending prompt text:", promptText);
+    if (contextFiles.length > 0) {
+      console.log("With context files:", contextFiles);
+    }
+
+    // Send prompt to extension with tabId and context
     vscode.postMessage({
       type: "prompt",
       tabId: tabId,
       prompt: promptText,
+      contextFiles: contextFiles.length > 0 ? contextFiles : undefined,
     });
 
     // Show loading/thinking indicator
@@ -580,6 +610,54 @@ window.addEventListener("message", (event: MessageEvent) => {
     // Update the tab store with the commands
     mynahUI.updateStore(message.tabId, {
       quickActionCommands,
+    });
+  } else if (message.type === "available-context") {
+    // Convert file list to MynahUI contextCommands format
+    const files = message.files as string[];
+
+    // Helper to get file icon based on extension
+    const getFileIcon = (path: string): string => {
+      const ext = path.split(".").pop()?.toLowerCase();
+      switch (ext) {
+        case "ts":
+        case "tsx":
+        case "js":
+        case "jsx":
+          return "file";
+        case "rs":
+          return "file";
+        case "md":
+          return "file";
+        case "json":
+          return "file";
+        case "toml":
+        case "yaml":
+        case "yml":
+          return "file";
+        default:
+          return "file";
+      }
+    };
+
+    // Group files - for now just one flat group
+    const contextCommands = [
+      {
+        groupName: "Files",
+        commands: files.map((filePath) => ({
+          command: filePath,
+          description: filePath,
+        })),
+      },
+    ];
+
+    console.log(
+      `Setting context commands: ${files.length} files`,
+      files.slice(0, 5),
+    );
+
+    // Update the tab store with the context commands
+    mynahUI.updateStore(message.tabId, {
+      contextCommands,
     });
   } else if (message.type === "agent-error") {
     // Display error message and stop loading

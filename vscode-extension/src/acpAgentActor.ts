@@ -311,28 +311,42 @@ export class AcpAgentActor {
    * @param agentSessionId - Agent session identifier
    * @param prompt - User prompt text
    */
-  async sendPrompt(agentSessionId: string, prompt: string): Promise<void> {
+  async sendPrompt(
+    agentSessionId: string,
+    prompt: string | acp.ContentBlock[],
+  ): Promise<void> {
     if (!this.connection) {
       throw new Error("ACP connection not initialized");
     }
 
+    // Build content blocks
+    const contentBlocks: acp.ContentBlock[] =
+      typeof prompt === "string" ? [{ type: "text", text: prompt }] : prompt;
+
+    // Log the prompt (truncate text for logging)
+    const textContent = contentBlocks
+      .filter((b) => b.type === "text")
+      .map((b) => (b as { type: "text"; text: string }).text)
+      .join("");
     const truncatedPrompt =
-      prompt.length > 100 ? prompt.slice(0, 100) + "..." : prompt;
+      textContent.length > 100
+        ? textContent.slice(0, 100) + "..."
+        : textContent;
+    const resourceCount = contentBlocks.filter(
+      (b) => b.type === "resource",
+    ).length;
+
     logger.info("agent", "Sending prompt to agent session", {
       agentSessionId,
-      promptLength: prompt.length,
+      promptLength: textContent.length,
       prompt: truncatedPrompt,
+      resourceCount,
     });
 
     // Send the prompt (this will complete when agent finishes)
     const promptResult = await this.connection.prompt({
       sessionId: agentSessionId,
-      prompt: [
-        {
-          type: "text",
-          text: prompt,
-        },
-      ],
+      prompt: contentBlocks,
     });
 
     logger.info("agent", "Prompt completed", {
