@@ -1,7 +1,8 @@
 import * as vscode from "vscode";
 import * as acp from "@agentclientprotocol/sdk";
-import { AcpAgentActor } from "./acpAgentActor";
+import { AcpAgentActor, ToolCallInfo, SlashCommandInfo } from "./acpAgentActor";
 import { AgentConfiguration } from "./agentConfiguration";
+import { WorkspaceFileIndex } from "./workspaceFileIndex";
 import { logger } from "./extension";
 import { v4 as uuidv4 } from "uuid";
 
@@ -32,6 +33,31 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   > = new Map(); // approvalId → promise resolvers
 
+  // Queue for notifications that arrive before session mapping is established
+  // agentSessionId → array of pending messages to send to webview
+  #pendingSessionNotifications: Map<string, any[]> = new Map();
+
+  // File index per workspace folder
+  #fileIndexes: Map<string, WorkspaceFileIndex> = new Map();
+  // Track which tabs are subscribed to which file index
+  #tabToFileIndex: Map<string, WorkspaceFileIndex> = new Map();
+
+  // Current editor selection state
+  #currentSelection: {
+    filePath: string;
+    relativePath: string;
+    startLine: number;
+    endLine: number;
+    text: string;
+  } | null = null;
+  #selectionDisposable: vscode.Disposable | null = null;
+
+  // Pending requests for selected tab ID
+  #selectedTabRequests: Map<
+    string,
+    { resolve: (tabId: string | undefined) => void }
+  > = new Map();
+
   constructor(
     extensionUri: vscode.Uri,
     context: vscode.ExtensionContext,
@@ -51,14 +77,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     // Return existing actor if we have one for this config
     const existing = this.#configToActor.get(key);
     if (existing) {
-      logger.info("agent", "Reusing existing agent actor", {
+      logger.debug("agent", "Reusing existing agent actor", {
         configKey: key,
         agentName: config.agentName,
       });
       return existing;
     }
 
-    logger.info("agent", "Spawning new agent actor", {
+    logger.important("agent", "Spawning new agent actor", {
       configKey: key,
       agentName: config.agentName,
       components: config.components,
@@ -67,6 +93,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     // Create a new actor with callbacks
     const actor = new AcpAgentActor({
       onAgentText: (agentSessionId, text) => {
+        const receiveTime = Date.now();
         const tabId = this.#agentSessionToTab.get(agentSessionId);
         if (tabId) {
           // Capture for testing if enabled
@@ -74,10 +101,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             this.#testResponseCapture.get(tabId)!.push(text);
           }
 
+          logger.debug("perf", "Received chunk from agent", {
+            receiveTime,
+            textLength: text.length,
+          });
           this.#sendToWebview({
             type: "agent-text",
             tabId,
             text,
+            timestamp: receiveTime,
+          });
+          const sendTime = Date.now();
+          logger.debug("perf", "Sent chunk to webview", {
+            sendTime,
+            delay: sendTime - receiveTime,
           });
         }
       },
@@ -105,7 +142,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             (opt) => opt.kind === "allow_once",
           );
           if (allowOption) {
-            logger.info(
+            logger.debug(
               "approval",
               "Auto-approved (bypass permissions enabled)",
               {
@@ -122,6 +159,36 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         // Need user approval - send request to webview and wait for response
         return this.#requestUserApproval(params, config.agentName);
       },
+      onToolCall: (agentSessionId: string, toolCall: ToolCallInfo) => {
+        const tabId = this.#agentSessionToTab.get(agentSessionId);
+        if (tabId) {
+          this.#sendToWebview({
+            type: "tool-call",
+            tabId,
+            toolCall,
+          });
+        }
+      },
+      onToolCallUpdate: (agentSessionId: string, toolCall: ToolCallInfo) => {
+        const tabId = this.#agentSessionToTab.get(agentSessionId);
+        if (tabId) {
+          this.#sendToWebview({
+            type: "tool-call-update",
+            tabId,
+            toolCall,
+          });
+        }
+      },
+      onAvailableCommands: (
+        agentSessionId: string,
+        commands: SlashCommandInfo[],
+      ) => {
+        const message = {
+          type: "available-commands",
+          commands,
+        };
+        this.#sendSessionNotification(agentSessionId, message);
+      },
     });
 
     // Initialize the actor
@@ -131,6 +198,305 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.#configToActor.set(key, actor);
 
     return actor;
+  }
+
+  /**
+   * Get or create a file index for the given workspace folder.
+   * File indexes are shared across tabs in the same workspace.
+   */
+  /**
+   * Set up tracking for editor selection changes.
+   * Broadcasts selection updates to all tabs when selection changes.
+   */
+  #setupSelectionTracking(): void {
+    // Clean up any existing listener
+    this.#selectionDisposable?.dispose();
+
+    // Track selection changes
+    this.#selectionDisposable = vscode.window.onDidChangeTextEditorSelection(
+      (event) => {
+        const editor = event.textEditor;
+        const selection = event.selections[0]; // Use primary selection
+
+        // Check if there's a non-empty selection
+        if (selection.isEmpty) {
+          if (this.#currentSelection !== null) {
+            this.#currentSelection = null;
+            this.#broadcastSelectionUpdate();
+          }
+          return;
+        }
+
+        // Get the selected text
+        const text = editor.document.getText(selection);
+        if (text.length === 0) {
+          if (this.#currentSelection !== null) {
+            this.#currentSelection = null;
+            this.#broadcastSelectionUpdate();
+          }
+          return;
+        }
+
+        // Get file path info
+        const filePath = editor.document.uri.fsPath;
+        const workspaceFolder = vscode.workspace.getWorkspaceFolder(
+          editor.document.uri,
+        );
+        let relativePath = filePath;
+        if (workspaceFolder) {
+          const prefix = workspaceFolder.uri.fsPath;
+          if (filePath.startsWith(prefix)) {
+            relativePath = filePath.slice(prefix.length);
+            if (relativePath.startsWith("/") || relativePath.startsWith("\\")) {
+              relativePath = relativePath.slice(1);
+            }
+          }
+        }
+
+        // Update current selection (1-indexed lines for display)
+        this.#currentSelection = {
+          filePath,
+          relativePath,
+          startLine: selection.start.line + 1,
+          endLine: selection.end.line + 1,
+          text,
+        };
+
+        this.#broadcastSelectionUpdate();
+      },
+    );
+
+    // Also check current selection immediately
+    const editor = vscode.window.activeTextEditor;
+    if (editor && !editor.selection.isEmpty) {
+      const selection = editor.selection;
+      const text = editor.document.getText(selection);
+      if (text.length > 0) {
+        const filePath = editor.document.uri.fsPath;
+        const workspaceFolder = vscode.workspace.getWorkspaceFolder(
+          editor.document.uri,
+        );
+        let relativePath = filePath;
+        if (workspaceFolder) {
+          const prefix = workspaceFolder.uri.fsPath;
+          if (filePath.startsWith(prefix)) {
+            relativePath = filePath.slice(prefix.length);
+            if (relativePath.startsWith("/") || relativePath.startsWith("\\")) {
+              relativePath = relativePath.slice(1);
+            }
+          }
+        }
+
+        this.#currentSelection = {
+          filePath,
+          relativePath,
+          startLine: selection.start.line + 1,
+          endLine: selection.end.line + 1,
+          text,
+        };
+      }
+    }
+  }
+
+  /**
+   * Broadcast selection update to all tabs.
+   */
+  #broadcastSelectionUpdate(): void {
+    // Send to all tabs that have file indexes
+    for (const [tabId, index] of this.#tabToFileIndex.entries()) {
+      this.#sendFileListToTab(tabId, index);
+    }
+  }
+
+  async #getOrCreateFileIndex(
+    workspaceFolder: vscode.WorkspaceFolder,
+    tabId: string,
+  ): Promise<WorkspaceFileIndex> {
+    const key = workspaceFolder.uri.fsPath;
+
+    let index = this.#fileIndexes.get(key);
+    if (!index) {
+      index = new WorkspaceFileIndex(workspaceFolder);
+      await index.initialize();
+
+      // Subscribe to changes and broadcast to all tabs using this index
+      index.onDidChange(() => {
+        this.#broadcastFileList(index!);
+      });
+
+      this.#fileIndexes.set(key, index);
+    }
+
+    // Track this tab's subscription
+    this.#tabToFileIndex.set(tabId, index);
+
+    return index;
+  }
+
+  /**
+   * Read file content for embedding in a prompt.
+   * Returns null if file cannot be read.
+   */
+  async #readFileContent(
+    filePath: string,
+    workspaceFolder: vscode.WorkspaceFolder,
+  ): Promise<{ absolutePath: string; text: string; mimeType: string } | null> {
+    // Resolve the path - could be relative to workspace or absolute
+    let absolutePath: string;
+    if (filePath.startsWith("/")) {
+      absolutePath = filePath;
+    } else {
+      absolutePath = vscode.Uri.joinPath(workspaceFolder.uri, filePath).fsPath;
+    }
+
+    try {
+      const uri = vscode.Uri.file(absolutePath);
+      const content = await vscode.workspace.fs.readFile(uri);
+      const text = new TextDecoder().decode(content);
+
+      // Determine MIME type from extension
+      const ext = filePath.split(".").pop()?.toLowerCase() || "";
+      const mimeType = this.#getMimeType(ext);
+
+      return { absolutePath, text, mimeType };
+    } catch (err) {
+      logger.error("context", "Failed to read file", {
+        path: absolutePath,
+        error: err,
+      });
+      return null;
+    }
+  }
+
+  /**
+   * Read symbol content for embedding in a prompt.
+   * Extracts the relevant lines from the file based on the symbol's range.
+   */
+  async #readSymbolContent(
+    filePath: string,
+    range: {
+      startLine: number;
+      startChar: number;
+      endLine: number;
+      endChar: number;
+    },
+    symbolName: string,
+    workspaceFolder: vscode.WorkspaceFolder,
+  ): Promise<{
+    absolutePath: string;
+    text: string;
+    mimeType: string;
+    startLine: number;
+    endLine: number;
+  } | null> {
+    // Resolve the path
+    let absolutePath: string;
+    if (filePath.startsWith("/")) {
+      absolutePath = filePath;
+    } else {
+      absolutePath = vscode.Uri.joinPath(workspaceFolder.uri, filePath).fsPath;
+    }
+
+    try {
+      const uri = vscode.Uri.file(absolutePath);
+      const content = await vscode.workspace.fs.readFile(uri);
+      const fullText = new TextDecoder().decode(content);
+      const lines = fullText.split("\n");
+
+      // Use the exact range from the LSP - no heuristic expansion
+      // LSP lines are 0-indexed
+      const startLine = range.startLine;
+      const endLine = range.endLine;
+
+      // Extract the relevant lines
+      const extractedLines = lines.slice(startLine, endLine + 1);
+      const text = extractedLines.join("\n");
+
+      // Determine MIME type
+      const ext = filePath.split(".").pop()?.toLowerCase() || "";
+      const mimeType = this.#getMimeType(ext);
+
+      return {
+        absolutePath,
+        text,
+        mimeType,
+        startLine: startLine + 1, // 1-indexed for display
+        endLine: endLine + 1,
+      };
+    } catch (err) {
+      logger.error("context", "Failed to read symbol content", {
+        path: absolutePath,
+        symbol: symbolName,
+        error: err,
+      });
+      return null;
+    }
+  }
+
+  /**
+   * Get MIME type for a file extension.
+   */
+  #getMimeType(ext: string): string {
+    const mimeTypes: Record<string, string> = {
+      ts: "text/typescript",
+      tsx: "text/typescript",
+      js: "text/javascript",
+      jsx: "text/javascript",
+      rs: "text/rust",
+      py: "text/python",
+      rb: "text/ruby",
+      go: "text/go",
+      java: "text/java",
+      c: "text/c",
+      cpp: "text/cpp",
+      h: "text/c",
+      hpp: "text/cpp",
+      md: "text/markdown",
+      json: "application/json",
+      yaml: "text/yaml",
+      yml: "text/yaml",
+      toml: "text/toml",
+      xml: "text/xml",
+      html: "text/html",
+      css: "text/css",
+      sql: "text/sql",
+      sh: "text/x-shellscript",
+      bash: "text/x-shellscript",
+      zsh: "text/x-shellscript",
+    };
+    return mimeTypes[ext] || "text/plain";
+  }
+
+  /**
+   * Send the current file list to a specific tab.
+   */
+  #sendFileListToTab(tabId: string, index: WorkspaceFileIndex): void {
+    const files = index.getFiles();
+    const symbols = index.getSymbols();
+    this.#sendToWebview({
+      type: "available-context",
+      tabId,
+      files,
+      symbols,
+      selection: this.#currentSelection,
+    });
+    logger.debug("context", "Sent context to tab", {
+      tabId,
+      fileCount: files.length,
+      symbolCount: symbols.length,
+      hasSelection: this.#currentSelection !== null,
+    });
+  }
+
+  /**
+   * Broadcast file list updates to all tabs subscribed to an index.
+   */
+  #broadcastFileList(index: WorkspaceFileIndex): void {
+    for (const [tabId, tabIndex] of this.#tabToFileIndex.entries()) {
+      if (tabIndex === index) {
+        this.#sendFileListToTab(tabId, index);
+      }
+    }
   }
 
   public resolveWebviewView(
@@ -147,15 +513,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     webviewView.webview.html = this.#getHtmlForWebview(webviewView.webview);
 
-    logger.info("webview", "Webview resolved and created");
+    logger.debug("webview", "Webview resolved and created");
+
+    // Set up selection tracking
+    this.#setupSelectionTracking();
 
     // Handle webview visibility changes
     webviewView.onDidChangeVisibility(() => {
       if (webviewView.visible) {
-        logger.info("webview", "Webview became visible");
+        logger.debug("webview", "Webview became visible");
         this.#onWebviewVisible();
       } else {
-        logger.info("webview", "Webview became hidden");
+        logger.debug("webview", "Webview became hidden");
         this.#onWebviewHidden();
       }
     });
@@ -192,11 +561,28 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             this.#tabToAgentSession.set(message.tabId, agentSessionId);
             this.#agentSessionToTab.set(agentSessionId, message.tabId);
 
-            console.log(
-              `Created agent session ${agentSessionId} for tab ${message.tabId} using ${config.describe()}`,
+            // Replay any notifications that arrived before mapping was established
+            this.#replayPendingSessionNotifications(
+              agentSessionId,
+              message.tabId,
             );
+
+            // Set up file index and send initial file list
+            const fileIndex = await this.#getOrCreateFileIndex(
+              config.workspaceFolder,
+              message.tabId,
+            );
+            this.#sendFileListToTab(message.tabId, fileIndex);
+
+            logger.important("agent", "Created agent session", {
+              agentSessionId,
+              tabId: message.tabId,
+              config: config.describe(),
+            });
           } catch (err) {
-            console.error("Failed to create agent session:", err);
+            logger.error("agent", "Failed to create agent session", {
+              error: err,
+            });
           }
           break;
 
@@ -206,50 +592,178 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           break;
 
         case "prompt":
-          console.log(`Received prompt for tab ${message.tabId}`);
+          logger.debug("agent", "Received prompt", {
+            tabId: message.tabId,
+            contextFiles: message.contextFiles,
+          });
 
           // Get the agent session for this tab
           const agentSessionId = this.#tabToAgentSession.get(message.tabId);
           if (!agentSessionId) {
-            console.error(`No agent session found for tab ${message.tabId}`);
+            logger.error("agent", "No agent session found for tab", {
+              tabId: message.tabId,
+            });
             return;
           }
 
           // Get the configuration and actor for this tab
           const tabConfig = this.#tabToConfig.get(message.tabId);
           if (!tabConfig) {
-            console.error(`No configuration found for tab ${message.tabId}`);
+            logger.error("agent", "No configuration found for tab", {
+              tabId: message.tabId,
+            });
             return;
           }
 
           const tabActor = this.#configToActor.get(tabConfig.key());
           if (!tabActor) {
-            console.error(
-              `No actor found for configuration ${tabConfig.key()}`,
-            );
+            logger.error("agent", "No actor found for configuration", {
+              configKey: tabConfig.key(),
+            });
             return;
           }
 
-          console.log(`Sending prompt to agent session ${agentSessionId}`);
+          // Build content blocks for the prompt
+          const contentBlocks: acp.ContentBlock[] = [];
+
+          // Add text prompt
+          if (message.prompt) {
+            contentBlocks.push({
+              type: "text",
+              text: message.prompt,
+            });
+          }
+
+          // Add file context as EmbeddedResource blocks
+          if (message.contextFiles && Array.isArray(message.contextFiles)) {
+            for (const filePath of message.contextFiles) {
+              try {
+                const content = await this.#readFileContent(
+                  filePath,
+                  tabConfig.workspaceFolder,
+                );
+                if (content !== null) {
+                  contentBlocks.push({
+                    type: "resource",
+                    resource: {
+                      uri: `file://${content.absolutePath}`,
+                      text: content.text,
+                      mimeType: content.mimeType,
+                    },
+                  });
+                  logger.debug("context", "Added file context", {
+                    path: filePath,
+                    size: content.text.length,
+                  });
+                }
+              } catch (err) {
+                logger.error("context", "Failed to read context file", {
+                  path: filePath,
+                  error: err,
+                });
+              }
+            }
+          }
+
+          // Add symbol context as EmbeddedResource blocks
+          if (message.contextSymbols && Array.isArray(message.contextSymbols)) {
+            for (const sym of message.contextSymbols) {
+              try {
+                const content = await this.#readSymbolContent(
+                  sym.location,
+                  sym.range,
+                  sym.name,
+                  tabConfig.workspaceFolder,
+                );
+                if (content !== null) {
+                  contentBlocks.push({
+                    type: "resource",
+                    resource: {
+                      uri: `file://${content.absolutePath}#L${content.startLine}-L${content.endLine}`,
+                      text: content.text,
+                      mimeType: content.mimeType,
+                    },
+                  });
+                  logger.debug("context", "Added symbol context", {
+                    name: sym.name,
+                    path: sym.location,
+                    lines: `${content.startLine}-${content.endLine}`,
+                    size: content.text.length,
+                  });
+                }
+              } catch (err) {
+                logger.error("context", "Failed to read symbol context", {
+                  name: sym.name,
+                  path: sym.location,
+                  error: err,
+                });
+              }
+            }
+          }
+
+          // Add selection context as EmbeddedResource blocks
+          if (
+            message.contextSelections &&
+            Array.isArray(message.contextSelections)
+          ) {
+            for (const sel of message.contextSelections) {
+              // Selection already contains the text, no need to read file
+              const ext =
+                sel.relativePath.split(".").pop()?.toLowerCase() || "";
+              const mimeType = this.#getMimeType(ext);
+
+              contentBlocks.push({
+                type: "resource",
+                resource: {
+                  uri: `file://${sel.filePath}#L${sel.startLine}-L${sel.endLine}`,
+                  text: sel.text,
+                  mimeType,
+                },
+              });
+              logger.debug("context", "Added selection context", {
+                path: sel.relativePath,
+                lines: `${sel.startLine}-${sel.endLine}`,
+                size: sel.text.length,
+              });
+            }
+          }
+
+          logger.debug("agent", "Sending prompt to agent", {
+            agentSessionId,
+            contentBlockCount: contentBlocks.length,
+          });
 
           // Send prompt to agent (responses come via callbacks)
           try {
-            await tabActor.sendPrompt(agentSessionId, message.prompt);
-          } catch (err) {
-            console.error("Failed to send prompt:", err);
-            // TODO: Send error message to webview
+            await tabActor.sendPrompt(agentSessionId, contentBlocks);
+          } catch (err: any) {
+            logger.error("agent", "Failed to send prompt", { error: err });
+            this.#sendToWebview({
+              type: "agent-error",
+              tabId: message.tabId,
+              error: err?.message || String(err),
+            });
           }
           break;
 
         case "webview-ready":
           // Webview is initialized and ready to receive messages
-          console.log("Webview ready - replaying queued messages");
+          logger.debug("webview", "Webview ready - replaying queued messages");
           this.#replayQueuedMessages();
           break;
 
         case "log":
           // Webview sending a log message
-          logger.info("webview", message.message, message.data);
+          logger.debug("webview", message.message, message.data);
+          break;
+
+        case "selected-tab-response":
+          // Response to a get-selected-tab request
+          const tabRequest = this.#selectedTabRequests.get(message.requestId);
+          if (tabRequest) {
+            this.#selectedTabRequests.delete(message.requestId);
+            tabRequest.resolve(message.tabId);
+          }
           break;
 
         case "approval-response":
@@ -271,7 +785,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                   agents,
                   vscode.ConfigurationTarget.Global,
                 );
-                logger.info("approval", "Bypass permissions enabled by user", {
+                logger.debug("approval", "Bypass permissions enabled by user", {
                   agent: pending.agentName,
                 });
               }
@@ -299,9 +813,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const remaining = queue.filter((msg) => msg.index > ackedIndex);
     this.#messageQueues.set(tabId, remaining);
 
-    console.log(
-      `Acked message ${ackedIndex} for tab ${tabId}, ${remaining.length} messages remain in queue`,
-    );
+    logger.debug("webview", "Message acknowledged", {
+      tabId,
+      ackedIndex,
+      remainingInQueue: remaining.length,
+    });
   }
 
   async #requestUserApproval(
@@ -330,7 +846,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     const tabId = tabIds[0]; // Use first tab for now
 
-    logger.info("approval", "Requesting user approval", {
+    logger.debug("approval", "Requesting user approval", {
       approvalId,
       tabId,
       agent: agentName,
@@ -366,7 +882,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     // Replay all queued messages for all tabs
     for (const [tabId, queue] of this.#messageQueues.entries()) {
       for (const message of queue) {
-        console.log(`Replaying message ${message.index} for tab ${tabId}`);
+        logger.debug("webview", "Replaying queued message", {
+          tabId,
+          messageIndex: message.index,
+        });
         this.#view.webview.postMessage(message);
       }
     }
@@ -379,7 +898,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     const tabId = message.tabId;
     if (!tabId) {
-      console.error("Message missing tabId:", message);
+      logger.error("webview", "Message missing tabId", { message });
       return;
     }
 
@@ -399,21 +918,70 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     // Send if webview is visible
     if (this.#view.visible) {
-      console.log(`Sending message ${index} for tab ${tabId}`);
+      logger.debug("webview", "Sending message to webview", {
+        tabId,
+        messageIndex: index,
+      });
       this.#view.webview.postMessage(indexedMessage);
     } else {
-      console.log(`Queued message ${index} for tab ${tabId} (webview hidden)`);
+      logger.debug("webview", "Queued message (webview hidden)", {
+        tabId,
+        messageIndex: index,
+      });
+    }
+  }
+
+  /**
+   * Send a session notification to the webview, or queue it if the session
+   * mapping isn't established yet.
+   *
+   * @param agentSessionId - The agent session ID
+   * @param message - The message to send (without tabId - will be added)
+   */
+  #sendSessionNotification(agentSessionId: string, message: any) {
+    const tabId = this.#agentSessionToTab.get(agentSessionId);
+
+    if (tabId) {
+      // Session mapping exists, send directly
+      this.#sendToWebview({ ...message, tabId });
+    } else {
+      // Queue until session mapping is established
+      logger.debug("agent", "Queuing notification (session not yet mapped)", {
+        agentSessionId,
+        messageType: message.type,
+      });
+      const queue = this.#pendingSessionNotifications.get(agentSessionId) ?? [];
+      queue.push(message);
+      this.#pendingSessionNotifications.set(agentSessionId, queue);
+    }
+  }
+
+  /**
+   * Replay any queued notifications for a session after the mapping is established.
+   */
+  #replayPendingSessionNotifications(agentSessionId: string, tabId: string) {
+    const queue = this.#pendingSessionNotifications.get(agentSessionId);
+    if (queue && queue.length > 0) {
+      logger.debug("agent", "Replaying queued notifications", {
+        agentSessionId,
+        tabId,
+        count: queue.length,
+      });
+      for (const message of queue) {
+        this.#sendToWebview({ ...message, tabId });
+      }
+      this.#pendingSessionNotifications.delete(agentSessionId);
     }
   }
 
   #onWebviewVisible() {
     // Visibility change detected - webview will send "webview-ready" when initialized
-    console.log("Webview became visible");
+    logger.debug("webview", "Webview became visible");
   }
 
   #onWebviewHidden() {
     // Nothing to do - messages stay queued until acked
-    console.log("Webview became hidden");
+    logger.debug("webview", "Webview became hidden");
   }
 
   #getHtmlForWebview(webview: vscode.Webview) {
@@ -450,12 +1018,115 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 </html>`;
   }
 
+  /**
+   * Request the currently selected tab ID from the webview.
+   * Returns undefined if no tab is selected.
+   */
+  async #getSelectedTabId(): Promise<string | undefined> {
+    if (!this.#view) {
+      return undefined;
+    }
+
+    const requestId = `req-${Date.now()}-${Math.random()}`;
+
+    return new Promise((resolve) => {
+      this.#selectedTabRequests.set(requestId, { resolve });
+
+      this.#view!.webview.postMessage({
+        type: "get-selected-tab",
+        requestId,
+      });
+
+      // Timeout after 1 second
+      setTimeout(() => {
+        if (this.#selectedTabRequests.has(requestId)) {
+          this.#selectedTabRequests.delete(requestId);
+          resolve(undefined);
+        }
+      }, 1000);
+    });
+  }
+
+  /**
+   * Add a frozen selection as context to the active tab's prompt input.
+   * Called when user triggers "Discuss in Symposium" code action.
+   * Creates a new tab if none exists.
+   */
+  public async addSelectionToPrompt(selection: {
+    filePath: string;
+    relativePath: string;
+    startLine: number;
+    endLine: number;
+    text: string;
+  }): Promise<void> {
+    // Ask webview for the currently selected tab
+    let tabId = await this.#getSelectedTabId();
+
+    // If no tab is selected, tell webview to create one and use that
+    if (!tabId) {
+      logger.debug("context", "No tab selected, requesting new tab creation");
+      tabId = await this.#requestNewTab();
+      if (!tabId) {
+        logger.error("context", "Failed to create new tab");
+        return;
+      }
+    }
+
+    // Send message to webview to add this as a custom context item
+    this.#sendToWebview({
+      type: "add-context-to-prompt",
+      tabId,
+      selection,
+    });
+
+    logger.debug("context", "Added frozen selection to prompt", {
+      tabId,
+      path: selection.relativePath,
+      lines: `${selection.startLine}-${selection.endLine}`,
+    });
+  }
+
+  /**
+   * Request the webview to create a new tab and return its ID.
+   */
+  async #requestNewTab(): Promise<string | undefined> {
+    if (!this.#view) {
+      return undefined;
+    }
+
+    const requestId = `req-${Date.now()}-${Math.random()}`;
+
+    return new Promise((resolve) => {
+      this.#selectedTabRequests.set(requestId, { resolve });
+
+      this.#view!.webview.postMessage({
+        type: "create-tab",
+        requestId,
+      });
+
+      // Timeout after 5 seconds (tab creation might take a moment)
+      setTimeout(() => {
+        if (this.#selectedTabRequests.has(requestId)) {
+          this.#selectedTabRequests.delete(requestId);
+          resolve(undefined);
+        }
+      }, 5000);
+    });
+  }
+
   dispose() {
     // Dispose all actors
     for (const actor of this.#configToActor.values()) {
       actor.dispose();
     }
     this.#configToActor.clear();
+
+    // Dispose all file indexes
+    for (const index of this.#fileIndexes.values()) {
+      index.dispose();
+    }
+    this.#fileIndexes.clear();
+    this.#tabToFileIndex.clear();
   }
 
   // Testing API - only use from integration tests
@@ -524,20 +1195,35 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           this.#tabToAgentSession.set(message.tabId, agentSessionId);
           this.#agentSessionToTab.set(agentSessionId, message.tabId);
 
-          logger.info("agent", "Agent session created", {
+          // Replay any notifications that arrived before mapping was established
+          this.#replayPendingSessionNotifications(
+            agentSessionId,
+            message.tabId,
+          );
+
+          // Set up file index and send initial file list
+          const fileIndex = await this.#getOrCreateFileIndex(
+            config.workspaceFolder,
+            message.tabId,
+          );
+          this.#sendFileListToTab(message.tabId, fileIndex);
+
+          logger.important("agent", "Agent session created", {
             tabId: message.tabId,
             agentSessionId,
             agentName: config.agentName,
             components: config.components,
           });
         } catch (err) {
-          console.error("Failed to create agent session:", err);
+          logger.error("agent", "Failed to create agent session", {
+            error: err,
+          });
         }
         break;
 
       case "prompt":
         try {
-          logger.info("agent", "Received prompt", { tabId: message.tabId });
+          logger.debug("agent", "Received prompt", { tabId: message.tabId });
 
           // Get the agent session for this tab
           const agentSessionId = this.#tabToAgentSession.get(message.tabId);
@@ -565,15 +1251,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             return;
           }
 
-          logger.info("agent", "Sending prompt to agent", {
+          logger.debug("agent", "Sending prompt to agent", {
             tabId: message.tabId,
             agentSessionId,
           });
 
           // Send prompt to agent (responses come via callbacks)
           await tabActor.sendPrompt(agentSessionId, message.prompt);
-        } catch (err) {
+        } catch (err: any) {
           logger.error("agent", "Failed to send prompt", { error: err });
+          this.#sendToWebview({
+            type: "agent-error",
+            tabId: message.tabId,
+            error: err?.message || String(err),
+          });
         }
         break;
 
@@ -596,7 +1287,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 agents,
                 vscode.ConfigurationTarget.Global,
               );
-              logger.info("approval", "Bypass permissions enabled by user", {
+              logger.debug("approval", "Bypass permissions enabled by user", {
                 agent: pending.agentName,
               });
             }

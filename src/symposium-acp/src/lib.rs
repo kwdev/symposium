@@ -11,10 +11,11 @@
 //! 4. Forward Initialize through the chain
 //! 5. Bidirectionally forward all subsequent messages
 
+use std::fs::File;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use sacp_conductor::conductor::Conductor;
+use sacp_conductor::Conductor;
 
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
 pub struct SymposiumArgs {
@@ -33,6 +34,14 @@ pub struct SymposiumArgs {
     /// Directory path for log files
     #[arg(long, default_value = ".symposium/logs")]
     log_path: PathBuf,
+
+    /// Redirect tracing output to a file instead of stderr
+    #[arg(long)]
+    log_to: Option<PathBuf>,
+
+    /// Set tracing filter (e.g., "info", "debug", "foo=trace,bar=debug")
+    #[arg(long)]
+    log: Option<String>,
 }
 
 impl SymposiumArgs {
@@ -69,18 +78,40 @@ impl SymposiumArgs {
 /// - Uses conductor with lazy initialization to build the proxy chain
 /// - Forwards all messages bidirectionally
 pub async fn run(args: &SymposiumArgs) -> Result<()> {
-    // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    // Determine the tracing filter
+    let filter = if let Some(ref log_filter) = args.log {
+        tracing_subscriber::EnvFilter::new(log_filter)
+    } else {
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+    };
+
+    // Initialize tracing - either to a file or to stderr
+    if let Some(ref log_file) = args.log_to {
+        // Create parent directory if it doesn't exist
+        if let Some(parent) = log_file.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let file = File::create(log_file)?;
+        tracing_subscriber::fmt()
+            .with_writer(file)
+            .with_env_filter(filter)
+            .with_ansi(false) // Disable ANSI colors for file output
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_writer(std::io::stderr)
+            .with_env_filter(filter)
+            .init();
+    }
 
     tracing::info!("Starting Symposium ACP meta proxy");
 
     // Create conductor with lazy initialization
-    symposium_conductor(args)?.run(sacp_tokio::Stdio).await?;
+    symposium_conductor(args)?
+        .run(sacp_tokio::Stdio::new())
+        .await?;
 
     Ok(())
 }
@@ -112,7 +143,7 @@ pub fn symposium_conductor(args: &SymposiumArgs) -> Result<Conductor> {
             }
 
             // TODO: Add more components based on capabilities
-            // - Check for IDE operation capabilities
+            // -car Check for IDE operation capabilities
             // - Spawn ide-ops adapter if missing
             // - Spawn ide-ops component to provide MCP tools
 
@@ -122,7 +153,7 @@ pub fn symposium_conductor(args: &SymposiumArgs) -> Result<Conductor> {
 
             Ok((init_req, components))
         },
-        None, // No custom conductor command
+        Default::default(),
     );
 
     Ok(conductor)

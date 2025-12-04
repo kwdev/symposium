@@ -17,7 +17,7 @@ use sacp::{
     },
     Handled, JrMessageHandler, MessageAndCx,
 };
-use sacp_proxy::McpServiceRegistry;
+use sacp_proxy::{JrCxExt, McpServiceRegistry};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{pin::pin, sync::Arc};
@@ -158,26 +158,28 @@ pub fn build_server(state: Arc<ResearchState>) -> sacp_proxy::McpServer {
     use sacp_proxy::McpServer;
 
     McpServer::new()
-        .instructions(
-            "Research Rust crate source code and APIs. Essential for working with unfamiliar crates.
+        .instructions(indoc::indoc! {"
+            Research Rust crate source code and APIs. Essential for working with unfamiliar crates.
 
-When to use:
-- Before using a new crate: get usage examples and understand the API
-- When compilation fails: verify actual method signatures, available fields, correct types
-- When implementation details matter: explore how features work internally
-- When documentation is unclear: see concrete code examples"
-        )
+            When to use:
+            - Before using a new crate: get usage examples and understand the API
+            - When compilation fails: verify actual method signatures, available fields, correct types
+            - When implementation details matter: explore how features work internally
+            - When documentation is unclear: see concrete code examples
+        "})
         .tool_fn(
             "rust_crate_query",
-            "Research a Rust crate by examining its actual source code.
+            indoc::indoc! {r#"
+                Research a Rust crate by examining its actual source code.
 
-Examples:
-- \"Show me how to create a tokio::runtime::Runtime and spawn tasks\"
-- \"What fields are available on serde::Deserialize? I'm getting a compilation error\"
-- \"How do I use async-trait with associated types?\"
-- \"What's the signature of reqwest::Client::get()?\"
+                Examples:
+                - "Show me how to create a tokio::runtime::Runtime and spawn tasks"
+                - "What fields are available on serde::Deserialize? I'm getting a compilation error"
+                - "How do I use async-trait with associated types?"
+                - "What's the signature of reqwest::Client::get()?"
 
-The research agent will examine the crate sources and return relevant code examples, signatures, and implementation details.",
+                The research agent will examine the crate sources and return relevant code examples, signatures, and implementation details.
+            "#},
             {
                 async move |input: RustCrateQueryParams, mcp_cx| {
                     let RustCrateQueryParams {
@@ -212,7 +214,7 @@ The research agent will examine the crate sources and return relevant code examp
                         modes: _,
                         meta: _,
                     } = cx
-                        .send_request(research_agent_session_request(
+                        .send_request_to_successor(research_agent_session_request(
                             sub_agent_mcp_registry,
                         ).map_err(|e| anyhow::anyhow!("Failed to create session request: {}", e))?)
                         .block_task()
@@ -245,7 +247,7 @@ The research agent will examine the crate sources and return relevant code examp
                                 stop_reason,
                                 meta: _,
                             } = cx
-                                .send_request(prompt_request)
+                                .send_request_to_successor(prompt_request)
                                 .block_task()
                                 .await
                                 .map_err(|e| anyhow::anyhow!("Prompt request failed: {}", e))?;

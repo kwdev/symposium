@@ -47,3 +47,8 @@ home = "0.5"
 dirs = "5.0"
 sacp-tokio.workspace = true
 fxhash.workspace = true
+
+[dev-dependencies]
+elizacp.workspace = true
+yopo.workspace = true
+expect-test = "1.5"
