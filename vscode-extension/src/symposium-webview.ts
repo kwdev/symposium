@@ -391,11 +391,21 @@ const config: any = {
     saveState();
   },
   onChatPrompt: (tabId: string, prompt: any) => {
+    console.log("onChatPrompt received:", JSON.stringify(prompt, null, 2));
+
+    // Build the full prompt text including command if present
+    let promptText = prompt.prompt || "";
+    if (prompt.command) {
+      promptText = prompt.command + (promptText ? " " + promptText : "");
+    }
+
+    console.log("Sending prompt text:", promptText);
+
     // Send prompt to extension with tabId
     vscode.postMessage({
       type: "prompt",
       tabId: tabId,
-      prompt: prompt.prompt,
+      prompt: promptText,
     });
 
     // Show loading/thinking indicator
@@ -406,7 +416,7 @@ const config: any = {
     // Add the user's prompt to the chat
     mynahUI.addChatItem(tabId, {
       type: ChatItemType.PROMPT,
-      body: prompt.prompt,
+      body: promptText,
     });
 
     // Initialize empty response for this tab
@@ -571,6 +581,39 @@ window.addEventListener("message", (event: MessageEvent) => {
     mynahUI.updateStore(message.tabId, {
       quickActionCommands,
     });
+  } else if (message.type === "agent-error") {
+    // Display error message and stop loading
+    mynahUI.updateStore(message.tabId, {
+      loadingChat: false,
+    });
+
+    // Add error card to chat - try to pretty print if it contains JSON
+    let errorBody = message.error;
+    const jsonMatch = errorBody.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      try {
+        const parsed = JSON.parse(jsonMatch[0]);
+        const prefix = errorBody.slice(0, jsonMatch.index).trim();
+        errorBody = prefix
+          ? `${prefix}\n\n\`\`\`json\n${JSON.stringify(parsed, null, 2)}\n\`\`\``
+          : `\`\`\`json\n${JSON.stringify(parsed, null, 2)}\n\`\`\``;
+      } catch {
+        errorBody = `\`\`\`\n${errorBody}\n\`\`\``;
+      }
+    } else {
+      errorBody = `\`\`\`\n${errorBody}\n\`\`\``;
+    }
+
+    mynahUI.addChatItem(message.tabId, {
+      type: ChatItemType.ANSWER,
+      body: `### Error\n\n${errorBody}`,
+      status: "error",
+    });
+
+    // Clear any pending response state
+    delete tabAgentResponses[message.tabId];
+    delete tabCurrentMessageId[message.tabId];
+    delete tabCurrentStreamType[message.tabId];
   }
 
   // Update lastSeenIndex and save state

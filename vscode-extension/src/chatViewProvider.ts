@@ -296,9 +296,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           // Send prompt to agent (responses come via callbacks)
           try {
             await tabActor.sendPrompt(agentSessionId, message.prompt);
-          } catch (err) {
+          } catch (err: any) {
             logger.error("agent", "Failed to send prompt", { error: err });
-            // TODO: Send error message to webview
+            this.#sendToWebview({
+              type: "agent-error",
+              tabId: message.tabId,
+              error: err?.message || String(err),
+            });
           }
           break;
 
@@ -695,8 +699,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
           // Send prompt to agent (responses come via callbacks)
           await tabActor.sendPrompt(agentSessionId, message.prompt);
-        } catch (err) {
+        } catch (err: any) {
           logger.error("agent", "Failed to send prompt", { error: err });
+          this.#sendToWebview({
+            type: "agent-error",
+            tabId: message.tabId,
+            error: err?.message || String(err),
+          });
         }
         break;
 

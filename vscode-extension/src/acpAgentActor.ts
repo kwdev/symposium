@@ -316,8 +316,12 @@ export class AcpAgentActor {
       throw new Error("ACP connection not initialized");
     }
 
+    const truncatedPrompt =
+      prompt.length > 100 ? prompt.slice(0, 100) + "..." : prompt;
     logger.info("agent", "Sending prompt to agent session", {
       agentSessionId,
+      promptLength: prompt.length,
+      prompt: truncatedPrompt,
     });
 
     // Send the prompt (this will complete when agent finishes)
