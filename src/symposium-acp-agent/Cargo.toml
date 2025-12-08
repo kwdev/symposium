@@ -1,0 +1,26 @@
+[package]
+name = "symposium-acp-agent"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Symposium-enriched ACP agent that wraps downstream agents with enhanced capabilities"
+repository = "https://github.com/symposium-dev/symposium"
+homepage = "https://symposium-dev.github.io/symposium/"
+readme = "README.md"
+
+[[bin]]
+name = "symposium-acp-agent"
+path = "src/main.rs"
+
+[dependencies]
+sacp-conductor.workspace = true
+sacp.workspace = true
+sacp-tokio.workspace = true
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+
+# Symposium components
+symposium-acp-proxy = { path = "../symposium-acp-proxy", version = "0.1.0" }

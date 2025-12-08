@@ -1,0 +1,55 @@
+//! Symposium ACP Agent
+//!
+//! A standalone agent binary that combines the Symposium component chain with
+//! a downstream agent. This is the "I am the agent" mode - Zed or other editors
+//! spawn this binary directly, and it provides an enriched agent experience.
+//!
+//! Usage:
+//!   symposium-acp-agent [OPTIONS] -- <agent-command> [agent-args...]
+//!
+//! Example:
+//!   symposium-acp-agent -- npx -y @zed-industries/claude-code-acp
+
+use anyhow::Result;
+use clap::Parser;
+use sacp::Component;
+use sacp_tokio::AcpAgent;
+
+#[derive(Parser, Debug)]
+#[command(name = "symposium-acp-agent")]
+#[command(about = "Symposium-enriched ACP agent")]
+#[command(
+    long_about = "Combines the Symposium component chain with a downstream agent.\n\n\
+                  This binary acts as an enriched agent - editors spawn it directly,\n\
+                  and it provides Symposium's capabilities on top of the underlying agent."
+)]
+struct Cli {
+    /// Disable Sparkle integration
+    #[arg(long, default_value = "false")]
+    no_sparkle: bool,
+
+    /// Disable the crate researcher
+    #[arg(long, default_value = "false")]
+    no_crate_researcher: bool,
+
+    /// The agent command and arguments (e.g., npx -y @zed-industries/claude-code-acp)
+    #[arg(last = true, required = true, num_args = 1..)]
+    agent: Vec<String>,
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    // Build a shell command string from the args
+    let agent: AcpAgent = AcpAgent::from_args(&cli.agent)?;
+
+    // Run Symposium with the agent as the downstream component
+    symposium_acp_proxy::Symposium::new()
+        .sparkle(!cli.no_sparkle)
+        .crate_sources_proxy(!cli.no_crate_researcher)
+        .serve(agent)
+        .await?;
+
+    Ok(())
+}
