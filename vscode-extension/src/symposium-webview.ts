@@ -545,7 +545,20 @@ vscode.postMessage({ type: "webview-ready" });
 
 // Save state helper
 function saveState() {
-  // Get current tabs from mynah UI
+  // Sync current prompt input text to store for each tab before saving
+  // This captures any text the user is currently typing
+  const allTabs = mynahUI?.getAllTabs();
+  if (allTabs) {
+    for (const tabId of Object.keys(allTabs)) {
+      const currentPromptText = mynahUI.getPromptInputText(tabId);
+      if (currentPromptText) {
+        // Update the store with the current prompt input text
+        mynahUI.updateStore(tabId, { promptInputText: currentPromptText });
+      }
+    }
+  }
+
+  // Get current tabs from mynah UI (now includes synced prompt input text)
   const currentTabs = mynahUI?.getAllTabs();
 
   // Debug: log what we're saving for prompt input state
