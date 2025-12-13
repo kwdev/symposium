@@ -38,6 +38,10 @@ struct Cli {
     #[arg(long)]
     trace_dir: Option<PathBuf>,
 
+    /// Enable logging to stderr at the specified level (error, warn, info, debug, trace).
+    #[arg(long)]
+    log: Option<tracing::Level>,
+
     /// The agent command and arguments (e.g., npx -y @zed-industries/claude-code-acp)
     #[arg(last = true, required = true, num_args = 1..)]
     agent: Vec<String>,
@@ -46,6 +50,15 @@ struct Cli {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Set up logging if requested
+    if let Some(level) = cli.log {
+        use tracing_subscriber::EnvFilter;
+        tracing_subscriber::fmt()
+            .with_env_filter(EnvFilter::new(level.to_string()))
+            .with_writer(std::io::stderr)
+            .init();
+    }
 
     // Build a shell command string from the args
     let agent: AcpAgent = AcpAgent::from_args(&cli.agent)?;
