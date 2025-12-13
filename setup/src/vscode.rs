@@ -87,8 +87,17 @@ fn copy_binary_to_extension(repo_root: &Path, extension_dir: &Path) -> Result<()
     }
 
     // Destination: vscode-extension/bin/<platform>-<arch>/
-    let platform = std::env::consts::OS;
-    let arch = std::env::consts::ARCH;
+    // Use Node.js naming conventions (darwin/win32/linux, arm64/x64)
+    let platform = match std::env::consts::OS {
+        "macos" => "darwin",
+        "windows" => "win32",
+        other => other,
+    };
+    let arch = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "x64",
+        other => other,
+    };
     let platform_dir = format!("{}-{}", platform, arch);
 
     let dest_dir = extension_dir.join("bin").join(&platform_dir);
