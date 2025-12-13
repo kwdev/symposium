@@ -526,15 +526,6 @@ const config: any = {
 if (mynahTabs) {
   config.tabs = mynahTabs;
   console.log("Initializing MynahUI with restored tabs");
-  // Debug: log what we're restoring for prompt input state
-  for (const [tabId, tabData] of Object.entries(mynahTabs)) {
-    const store = (tabData as any)?.store;
-    if (store?.promptInputText) {
-      console.log(
-        `Restoring tab ${tabId} with promptInputText: "${store.promptInputText.substring(0, 50)}..."`,
-      );
-    }
-  }
 }
 
 mynahUI = new MynahUI(config);
@@ -560,18 +551,6 @@ function saveState() {
 
   // Get current tabs from mynah UI (now includes synced prompt input text)
   const currentTabs = mynahUI?.getAllTabs();
-
-  // Debug: log what we're saving for prompt input state
-  if (currentTabs) {
-    for (const [tabId, tabData] of Object.entries(currentTabs)) {
-      const store = (tabData as any)?.store;
-      if (store?.promptInputText) {
-        console.log(
-          `Tab ${tabId} has promptInputText: "${store.promptInputText.substring(0, 50)}..."`,
-        );
-      }
-    }
-  }
 
   const state: WebviewState = {
     extensionActivationId: currentExtensionActivationId,
