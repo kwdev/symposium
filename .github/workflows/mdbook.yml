@@ -29,13 +29,13 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      MDBOOK_VERSION: 0.4.36
+      MDBOOK_VERSION: 0.5.1
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-        
+
       - name: Cache cargo registry and index
         uses: actions/cache@v4
         with:
@@ -46,7 +46,7 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
-            
+
       - name: Cache cargo binaries
         uses: actions/cache@v4
         with:
@@ -54,23 +54,19 @@ jobs:
           key: ${{ runner.os }}-cargo-bin-mdbook-${{ env.MDBOOK_VERSION }}
           restore-keys: |
             ${{ runner.os }}-cargo-bin-mdbook-
-            
+
       - name: Install mdBook
         run: |
-          if ! command -v mdbook &> /dev/null; then
-            cargo install --version ${MDBOOK_VERSION} mdbook
-          fi
-          if ! command -v mdbook-mermaid &> /dev/null; then
-            cargo install mdbook-mermaid
-          fi
-          
+          cargo install --version ${MDBOOK_VERSION} mdbook
+          cargo install mdbook-mermaid
+
       - name: Setup Pages
         id: pages
         uses: actions/configure-pages@v5
-        
+
       - name: Build with mdBook
         run: mdbook build
-        
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
