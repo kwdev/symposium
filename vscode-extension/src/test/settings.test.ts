@@ -178,7 +178,7 @@ suite("Settings Test Suite", () => {
       this.timeout(10000);
 
       // Activate the extension
-      const extension = vscode.extensions.getExtension("symposium.symposium");
+      const extension = vscode.extensions.getExtension("symposium-dev.symposium");
       assert.ok(extension);
       await extension.activate();
 
@@ -224,7 +224,7 @@ suite("Settings Test Suite", () => {
       this.timeout(10000);
 
       // Activate the extension
-      const extension = vscode.extensions.getExtension("symposium.symposium");
+      const extension = vscode.extensions.getExtension("symposium-dev.symposium");
       assert.ok(extension);
       await extension.activate();
 
