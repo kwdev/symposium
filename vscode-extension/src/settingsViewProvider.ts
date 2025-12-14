@@ -74,6 +74,10 @@ export class SettingsViewProvider implements vscode.WebviewViewProvider {
             "symposium",
           );
           break;
+        case "toggle-require-modifier-to-send":
+          // Toggle the requireModifierToSend setting
+          await this.#toggleRequireModifierToSend();
+          break;
       }
     });
   }
@@ -110,6 +114,17 @@ export class SettingsViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  async #toggleRequireModifierToSend() {
+    const config = vscode.workspace.getConfiguration("symposium");
+    const currentValue = config.get<boolean>("requireModifierToSend", false);
+    await config.update(
+      "requireModifierToSend",
+      !currentValue,
+      vscode.ConfigurationTarget.Global,
+    );
+    this.#sendConfiguration();
+  }
+
   #sendConfiguration() {
     if (!this.#view) {
       return;
@@ -119,12 +134,17 @@ export class SettingsViewProvider implements vscode.WebviewViewProvider {
     const agents = config.get("agents", {});
     const currentAgent = config.get("currentAgent", "");
     const components = config.get("components", {});
+    const requireModifierToSend = config.get<boolean>(
+      "requireModifierToSend",
+      false,
+    );
 
     this.#view.webview.postMessage({
       type: "config",
       agents,
       currentAgent,
       components,
+      requireModifierToSend,
     });
   }
 
@@ -199,6 +219,25 @@ export class SettingsViewProvider implements vscode.WebviewViewProvider {
             font-size: 11px;
             color: var(--vscode-descriptionForeground);
         }
+        .checkbox-item {
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            padding: 8px 0;
+        }
+        .checkbox-item input[type="checkbox"] {
+            margin-top: 2px;
+            cursor: pointer;
+        }
+        .checkbox-item label {
+            cursor: pointer;
+            flex: 1;
+        }
+        .checkbox-description {
+            font-size: 12px;
+            color: var(--vscode-descriptionForeground);
+            margin-top: 4px;
+        }
     </style>
 </head>
 <body>
@@ -213,6 +252,19 @@ export class SettingsViewProvider implements vscode.WebviewViewProvider {
         <h2>Components</h2>
         <div class="component-list" id="component-list">
             <div>Loading...</div>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Preferences</h2>
+        <div class="checkbox-item">
+            <input type="checkbox" id="require-modifier-to-send" />
+            <label for="require-modifier-to-send">
+                <div>Require modifier key to send</div>
+                <div class="checkbox-description">
+                    When enabled, Enter adds a newline and Shift+Enter (or Cmd+Enter) sends the prompt.
+                </div>
+            </label>
         </div>
     </div>
 
@@ -234,6 +286,11 @@ export class SettingsViewProvider implements vscode.WebviewViewProvider {
             vscode.postMessage({ type: 'open-settings' });
         };
 
+        // Handle require modifier to send checkbox
+        document.getElementById('require-modifier-to-send').onchange = (e) => {
+            vscode.postMessage({ type: 'toggle-require-modifier-to-send' });
+        };
+
         // Handle messages from extension
         window.addEventListener('message', event => {
             const message = event.data;
@@ -241,8 +298,14 @@ export class SettingsViewProvider implements vscode.WebviewViewProvider {
             if (message.type === 'config') {
                 renderAgents(message.agents, message.currentAgent);
                 renderComponents(message.components);
+                renderPreferences(message.requireModifierToSend);
             }
         });
+
+        function renderPreferences(requireModifierToSend) {
+            const checkbox = document.getElementById('require-modifier-to-send');
+            checkbox.checked = requireModifierToSend;
+        }
 
         function renderAgents(agents, currentAgent) {
             const list = document.getElementById('agent-list');
