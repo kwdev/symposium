@@ -10,7 +10,7 @@
 use crate::crate_sources_mcp;
 use indoc::formatdoc;
 use sacp::{
-    mcp_server::{McpServer, McpServiceRegistry},
+    mcp_server::McpServer,
     schema::{
         RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse, StopReason,
     },
@@ -19,12 +19,7 @@ use sacp::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::{
-    path::Path,
-    sync::{Arc, Mutex},
-};
-
-/// Create a NewSessionRequest for the research agent.
+use std::sync::{Arc, Mutex};
 
 /// Build the research prompt with context and instructions for the sub-agent.
 pub fn build_research_prompt(user_prompt: &str) -> String {
@@ -69,15 +64,14 @@ pub struct RustCrateQueryParams {
 
 /// Output from the rust_crate_query tool
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
-struct RustCrateQueryOutput {
+pub struct RustCrateQueryOutput {
     /// The research findings
-    result: Vec<serde_json::Value>,
+    pub result: Vec<serde_json::Value>,
 }
 
 /// Build the MCP server for crate research queries
-pub fn build_server(cwd: &Path) -> McpServer<ProxyToConductor> {
-    let cwd = cwd.to_path_buf();
-    McpServer::new()
+pub fn build_server() -> McpServer<ProxyToConductor, impl sacp::JrResponder<ProxyToConductor>> {
+    McpServer::builder("rust-crate-query".to_string())
         .instructions(indoc::indoc! {"
             Research Rust crate source code and APIs. Essential for working with unfamiliar crates.
 
@@ -87,7 +81,7 @@ pub fn build_server(cwd: &Path) -> McpServer<ProxyToConductor> {
             - When implementation details matter: explore how features work internally
             - When documentation is unclear: see concrete code examples
         "})
-        .tool_fn(
+        .tool_fn_mut(
             "rust_crate_query",
             indoc::indoc! {r#"
                 Research a Rust crate by examining its actual source code.
@@ -100,83 +94,93 @@ pub fn build_server(cwd: &Path) -> McpServer<ProxyToConductor> {
 
                 The research agent will examine the crate sources and return relevant code examples, signatures, and implementation details.
             "#},
-            {
-                async move |input: RustCrateQueryParams, mcp_cx: sacp::mcp_server::McpContext<ProxyToConductor>| -> Result<RustCrateQueryOutput, sacp::Error> {
-                    let RustCrateQueryParams {
-                        crate_name,
-                        crate_version,
-                        prompt,
-                    } = input;
-
-                    tracing::info!(
-                        "Received crate query for '{}' version: {:?}",
-                        crate_name,
-                        crate_version
-                    );
-                    tracing::debug!("Research prompt: {}", prompt);
-
-                    let cx = mcp_cx.connection_cx();
-
-                    // Create a channel for receiving responses from the sub-agent's return_response_to_user calls
-                    let responses: Arc<Mutex<Vec<serde_json::Value>>> = Default::default();
-                    let mcp_servers = McpServiceRegistry::new()
-                    .with_mcp_server(
-                        "rust-crate-sources",
-                        crate_sources_mcp::build_server(responses.clone()),
-                    )?;
-
-                    // Spawn the sub-agent session with the per-instance MCP registry
-                    let mut active_session = cx.build_session(cwd.clone())
-                        .with_mcp_servers(&mcp_servers)?
-                        .send_request()
-                        .await?;
-                    tracing::debug!(session_id = ?active_session.session_id(), "Session active");
-
-                    active_session.send_prompt(build_research_prompt(&prompt))?;
-                    tracing::debug!("Send research prompt to session");
-
-                    loop {
-                        match active_session.read_update().await? {
-                            sacp::SessionMessage::SessionMessage(message_cx) => MatchMessage::new(message_cx)
-                                .if_request(async |request: RequestPermissionRequest, request_cx| {
-                                    approve_tool_request(request, request_cx)
-                                })
-                                .await
-                                .otherwise(async |message| {
-                                    // Log any other messages, we don't care about them
-                                    tracing::trace!(?message);
-                                    Ok(())
-                                })
-                                .await?,
-
-                            // Once the turn is over, we stop.
-                            sacp::SessionMessage::StopReason(stop_reason) => match stop_reason {
-                                StopReason::EndTurn => {
-                                    // Once the agent finishes its turn, results should have been collected into the responses vector
-                                    let result = std::mem::replace(
-                                        &mut *responses.lock().expect("not poisoned"),
-                                        vec![]
-                                    );
-                                    return Ok(RustCrateQueryOutput { result });
-                                }
-
-                                // Other stop reasons are an error. What gives!
-                                StopReason::MaxTokens |
-                                StopReason::MaxTurnRequests |
-                                StopReason::Refusal |
-                                StopReason::Cancelled => {
-                                    return Err(sacp::util::internal_error(format!("researcher stopped early: {stop_reason:?}")));
-                                }
-                            }
-
-                            // Anything else, just ignore.
-                            _ => {}
-                        }
-                    }
-                }
+            async move |input: RustCrateQueryParams, mcp_cx: sacp::mcp_server::McpContext<ProxyToConductor>| {
+                run_research_query(input, mcp_cx).await
             },
-            |f, args, cx| Box::pin(f(args, cx)),
+            sacp::tool_fn_mut!(),
         )
+        .build()
+}
+
+async fn run_research_query(
+    input: RustCrateQueryParams,
+    mcp_cx: sacp::mcp_server::McpContext<ProxyToConductor>,
+) -> Result<RustCrateQueryOutput, sacp::Error> {
+    let RustCrateQueryParams {
+        crate_name,
+        crate_version,
+        prompt,
+    } = input;
+
+    tracing::info!(
+        "Received crate query for '{}' version: {:?}",
+        crate_name,
+        crate_version
+    );
+    tracing::debug!("Research prompt: {}", prompt);
+
+    let cx = mcp_cx.connection_cx();
+
+    // Create a channel for receiving responses from the sub-agent's return_response_to_user calls
+    let responses: Arc<Mutex<Vec<serde_json::Value>>> = Default::default();
+    let mcp_server = crate_sources_mcp::build_server(responses.clone());
+
+    // Spawn the sub-agent session with the per-instance MCP server
+    // Use current directory since we don't have access to session cwd here
+    let cwd = std::env::current_dir().unwrap_or_default();
+
+    cx.build_session(cwd)
+        .with_mcp_server(mcp_server)?
+        .run_session(async |mut active_session| {
+            tracing::debug!(session_id = ?active_session.session_id(), "Session active");
+
+            active_session.send_prompt(build_research_prompt(&prompt))?;
+            tracing::debug!("Sent research prompt to session");
+
+            loop {
+                match active_session.read_update().await? {
+                    sacp::SessionMessage::SessionMessage(message_cx) => {
+                        MatchMessage::new(message_cx)
+                            .if_request(async |request: RequestPermissionRequest, request_cx| {
+                                approve_tool_request(request, request_cx)
+                            })
+                            .await
+                            .otherwise(async |message| {
+                                // Log any other messages, we don't care about them
+                                tracing::trace!(?message);
+                                Ok(())
+                            })
+                            .await?
+                    }
+
+                    // Once the turn is over, we stop.
+                    sacp::SessionMessage::StopReason(stop_reason) => match stop_reason {
+                        StopReason::EndTurn => {
+                            // Once the agent finishes its turn, results should have been collected into the responses vector
+                            let result = std::mem::replace(
+                                &mut *responses.lock().expect("not poisoned"),
+                                vec![],
+                            );
+                            return Ok(RustCrateQueryOutput { result });
+                        }
+
+                        // Other stop reasons are an error. What gives!
+                        StopReason::MaxTokens
+                        | StopReason::MaxTurnRequests
+                        | StopReason::Refusal
+                        | StopReason::Cancelled => {
+                            return Err(sacp::util::internal_error(format!(
+                                "researcher stopped early: {stop_reason:?}"
+                            )));
+                        }
+                    },
+
+                    // Anything else, just ignore.
+                    _ => {}
+                }
+            }
+        })
+        .await
 }
 
 fn approve_tool_request(

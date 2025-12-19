@@ -13,14 +13,14 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
-sacp = "6.0.0"
-sacp-tokio = "6.0.0"
-sacp-conductor = "6.0.0"
-sacp-rmcp = "6.0.0"
-sacp-tee = "6.0.0"
-sacp-test = "1.0.0"
-yopo = "6.0.0"
-elizacp = "6.0.0"
+sacp = "9.0.0"
+sacp-tokio = "9.0.0"
+sacp-conductor = "9.0.0"
+sacp-rmcp = "9.0.0"
+sacp-tee = "9.0.0"
+sacp-test = "9.0.0"
+yopo = "9.0.0"
+elizacp = "9.0.0"
 jsonrpcmsg = "0.1.2"
 
 # Core async runtime
@@ -57,3 +57,7 @@ clap = { version = "4.0", features = ["derive"] }
 which = "6.0"
 home = "0.5"
 fxhash = "0.2.1"
+
+# Local overrides for development
+[patch.crates-io]
+sparkle-mcp = { path = "../sparkle" }

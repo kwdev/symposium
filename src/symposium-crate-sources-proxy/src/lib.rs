@@ -9,9 +9,7 @@ mod research_agent;
 
 use anyhow::Result;
 use sacp::component::Component;
-use sacp::mcp_server::McpServiceRegistry;
-use sacp::schema::NewSessionRequest;
-use sacp::{Agent, Client, ProxyToConductor};
+use sacp::ProxyToConductor;
 
 /// Run the proxy as a standalone binary connected to stdio
 pub async fn run() -> Result<()> {
@@ -37,22 +35,7 @@ impl Component for CrateSourcesProxy {
     async fn serve(self, client: impl Component) -> Result<(), sacp::Error> {
         ProxyToConductor::builder()
             .name("rust-crate-sources-proxy")
-            .on_receive_request_from(
-                Client,
-                async |mut request: NewSessionRequest, request_cx, cx| {
-                    McpServiceRegistry::new()
-                        .with_mcp_server(
-                            "rust-crate-query",
-                            research_agent::build_server(&request.cwd),
-                        )?
-                        .add_registered_mcp_servers_to(&mut request, &cx)?
-                        .into_iter()
-                        .for_each(|r| r.run_indefinitely());
-
-                    cx.send_request_to(Agent, request)
-                        .forward_to_request_cx(request_cx)
-                },
-            )
+            .with_mcp_server(research_agent::build_server())
             .serve(client)
             .await
     }
