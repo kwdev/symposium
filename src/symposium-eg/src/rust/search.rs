@@ -1,6 +1,6 @@
 //! Text searching within extracted crates
 
-use crate::eg::{Result, EgError, Match};
+use crate::{EgError, Match, Result};
 use regex::Regex;
 use std::fs;
 use std::path::Path;
@@ -23,7 +23,14 @@ impl CrateSearcher {
         let mut example_matches = Vec::new();
         let mut other_matches = Vec::new();
 
-        self.search_directory(crate_path, crate_path, pattern, context_lines, &mut example_matches, &mut other_matches)?;
+        self.search_directory(
+            crate_path,
+            crate_path,
+            pattern,
+            context_lines,
+            &mut example_matches,
+            &mut other_matches,
+        )?;
 
         Ok((example_matches, other_matches))
     }
@@ -49,7 +56,14 @@ impl CrateSearcher {
                         continue;
                     }
                 }
-                self.search_directory(base_path, &path, pattern, context_lines, example_matches, other_matches)?;
+                self.search_directory(
+                    base_path,
+                    &path,
+                    pattern,
+                    context_lines,
+                    example_matches,
+                    other_matches,
+                )?;
             } else if path.extension().map_or(false, |ext| ext == "rs") {
                 // Search Rust files
                 if let Ok(matches) = self.search_file(base_path, &path, pattern, context_lines) {
@@ -74,8 +88,13 @@ impl CrateSearcher {
         pattern: &Regex,
         context_lines: usize,
     ) -> Result<Vec<Match>> {
-        let content = fs::read_to_string(file_path)
-            .map_err(|e| EgError::Other(format!("Failed to read file {}: {}", file_path.display(), e)))?;
+        let content = fs::read_to_string(file_path).map_err(|e| {
+            EgError::Other(format!(
+                "Failed to read file {}: {}",
+                file_path.display(),
+                e
+            ))
+        })?;
 
         let lines: Vec<&str> = content.lines().collect();
         let mut matches = Vec::new();
@@ -83,23 +102,24 @@ impl CrateSearcher {
         for (line_idx, line) in lines.iter().enumerate() {
             if pattern.is_match(line) {
                 let line_number = (line_idx + 1) as u32; // 1-based line numbers
-                
+
                 // Get context lines
                 let context_start = line_idx.saturating_sub(context_lines);
                 let context_end = std::cmp::min(line_idx + context_lines + 1, lines.len());
-                
+
                 let context_before = lines[context_start..line_idx]
                     .iter()
                     .map(|s| s.to_string())
                     .collect();
-                
+
                 let context_after = lines[line_idx + 1..context_end]
                     .iter()
                     .map(|s| s.to_string())
                     .collect();
 
                 // Get relative path from base
-                let relative_path = file_path.strip_prefix(base_path)
+                let relative_path = file_path
+                    .strip_prefix(base_path)
                     .unwrap_or(file_path)
                     .to_path_buf();
 
@@ -119,9 +139,17 @@ impl CrateSearcher {
     /// Check if a file is in the examples directory
     fn is_example_file(&self, base_path: &Path, file_path: &Path) -> bool {
         if let Ok(relative_path) = file_path.strip_prefix(base_path) {
-            relative_path.components().any(|c| c.as_os_str() == "examples")
+            relative_path
+                .components()
+                .any(|c| c.as_os_str() == "examples")
         } else {
             false
         }
+    }
+}
+
+impl Default for CrateSearcher {
+    fn default() -> Self {
+        Self::new()
     }
 }

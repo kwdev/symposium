@@ -1,6 +1,11 @@
-//! # eg - Example Search Library
+//! # symposium-eg - Example Search Library
 //!
-//! Programmatic access to library examples and documentation.
+//! Programmatic access to Rust crate source code.
+//!
+//! This library provides tools for downloading, caching, and searching
+//! Rust crate source code. It handles version resolution (explicit,
+//! from current project, or latest), crate extraction from crates.io,
+//! and text searching with context.
 
 pub mod error;
 pub mod rust;
@@ -9,17 +14,17 @@ pub use error::{EgError, Result};
 
 use std::path::PathBuf;
 
-/// Main entry point for example searches
+/// Main entry point for crate source access
 pub struct Eg;
 
 impl Eg {
-    /// Search for examples in a Rust crate
+    /// Access a Rust crate's source code
     pub fn rust_crate(name: &str) -> rust::RustCrateSearch {
         rust::RustCrateSearch::new(name)
     }
 }
 
-/// Result of an example search
+/// Result of a crate search
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SearchResult {
     /// The exact version that was searched

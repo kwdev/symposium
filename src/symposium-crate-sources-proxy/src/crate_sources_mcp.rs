@@ -8,7 +8,6 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::eg;
 use sacp::mcp_server::McpServer;
 use sacp::ProxyToConductor;
 use schemars::JsonSchema;
@@ -67,7 +66,7 @@ pub fn build_server(
                     version,
                 );
 
-                let mut search = eg::Eg::rust_crate(&crate_name);
+                let mut search = symposium_eg::Eg::rust_crate(&crate_name);
 
                 // Use version resolver for semver range support and project detection
                 if let Some(version_spec) = version {

@@ -3224,33 +3224,42 @@ name = "symposium-crate-sources-proxy"
 version = "1.0.0-alpha.1"
 dependencies = [
  "anyhow",
- "cargo_metadata",
- "crates_io_api",
- "dirs",
  "elizacp",
  "expect-test",
- "flate2",
  "futures",
  "fxhash",
- "home",
  "indoc",
  "jsonrpcmsg",
- "regex",
- "reqwest",
  "sacp",
  "sacp-conductor",
  "sacp-tokio",
  "schemars",
- "semver",
  "serde",
  "serde_json",
- "tar",
+ "symposium-eg",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
  "tracing",
  "tracing-subscriber",
  "yopo",
+]
+
+[[package]]
+name = "symposium-eg"
+version = "1.0.0-alpha.1"
+dependencies = [
+ "cargo_metadata",
+ "crates_io_api",
+ "dirs",
+ "flate2",
+ "home",
+ "regex",
+ "reqwest",
+ "semver",
+ "serde",
+ "tar",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

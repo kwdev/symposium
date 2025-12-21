@@ -5,7 +5,7 @@ use thiserror::Error;
 /// Result type alias for eg operations
 pub type Result<T> = std::result::Result<T, EgError>;
 
-/// Errors that can occur during example searching
+/// Errors that can occur during crate source operations
 #[derive(Debug, Error)]
 pub enum EgError {
     /// Failed to parse or access project metadata
@@ -31,7 +31,10 @@ pub enum EgError {
     CrateNotFound(String),
     /// No matching versions found
     #[error("No versions of '{crate_name}' match constraint '{constraint}'")]
-    NoMatchingVersions { crate_name: String, constraint: String },
+    NoMatchingVersions {
+        crate_name: String,
+        constraint: String,
+    },
     /// Other error
     #[error("Error: {0}")]
     Other(String),

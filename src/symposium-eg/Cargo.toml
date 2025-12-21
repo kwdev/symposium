@@ -1,0 +1,34 @@
+[package]
+name = "symposium-eg"
+version = "1.0.0-alpha.1"
+edition = "2021"
+license = "Apache-2.0"
+description = "Example search library for Rust crates - download, cache, and search crate source code"
+repository = "https://github.com/symposium-dev/symposium"
+homepage = "https://symposium-dev.github.io/symposium/"
+
+[dependencies]
+# Error handling
+thiserror = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+
+# Search
+regex = "1.10"
+
+# Version resolution
+semver = "1.0"
+cargo_metadata = "0.18"
+
+# Crate extraction
+flate2 = "1.0"
+tar = "0.4"
+
+# Crate download
+crates_io_api = { version = "0.12", default-features = false, features = ["rustls"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
+# Cache paths
+home = "0.5"
+dirs = "5.0"

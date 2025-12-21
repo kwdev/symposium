@@ -4,7 +4,6 @@
 //! Rust crate sources via dedicated sub-agent sessions.
 
 mod crate_sources_mcp;
-mod eg;
 mod research_agent;
 
 use anyhow::Result;

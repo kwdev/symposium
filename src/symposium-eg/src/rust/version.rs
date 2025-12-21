@@ -1,6 +1,6 @@
 //! Version resolution for Rust crates
 
-use crate::eg::{Result, EgError};
+use crate::{Result, EgError};
 use cargo_metadata::{MetadataCommand, CargoOpt};
 use semver::{Version, VersionReq};
 
@@ -48,15 +48,15 @@ impl VersionResolver {
     async fn resolve_version_constraint(&self, crate_name: &str, constraint: &str) -> Result<String> {
         let req = VersionReq::parse(constraint)?;
         let available_versions = self.get_available_versions(crate_name).await?;
-        
+
         // Find the latest version that matches the constraint
         let mut matching_versions: Vec<_> = available_versions
             .into_iter()
             .filter(|v| req.matches(v))
             .collect();
-        
+
         matching_versions.sort();
-        
+
         matching_versions
             .last()
             .map(|v| v.to_string())
@@ -69,7 +69,7 @@ impl VersionResolver {
     /// Get latest version from crates.io
     async fn get_latest_version(&self, crate_name: &str) -> Result<String> {
         let client = crates_io_api::AsyncClient::new(
-            "eg-library (https://github.com/symposium/eg)",
+            "symposium-eg (https://github.com/symposium-dev/symposium)",
             std::time::Duration::from_millis(1000),
         ).map_err(|e| EgError::Other(e.to_string()))?;
 
@@ -82,7 +82,7 @@ impl VersionResolver {
     /// Get all available versions from crates.io
     async fn get_available_versions(&self, crate_name: &str) -> Result<Vec<Version>> {
         let client = crates_io_api::AsyncClient::new(
-            "eg-library (https://github.com/symposium/eg)",
+            "symposium-eg (https://github.com/symposium-dev/symposium)",
             std::time::Duration::from_millis(1000),
         ).map_err(|e| EgError::Other(e.to_string()))?;
 
@@ -98,5 +98,11 @@ impl VersionResolver {
         }
 
         Ok(parsed_versions)
+    }
+}
+
+impl Default for VersionResolver {
+    fn default() -> Self {
+        Self::new()
     }
 }

@@ -1,6 +1,6 @@
-//! Rust-specific example searching functionality
+//! Rust-specific crate source functionality
 
-use crate::eg::{Result, SearchResult};
+use crate::{Result, SearchResult};
 use regex::Regex;
 
 mod cache;
@@ -13,7 +13,7 @@ pub use extraction::CrateExtractor;
 pub use search::CrateSearcher;
 pub use version::VersionResolver;
 
-/// Builder for searching Rust crate examples
+/// Builder for accessing Rust crate source code
 pub struct RustCrateSearch {
     crate_name: String,
     version_spec: Option<String>,
