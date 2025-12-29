@@ -29,11 +29,11 @@ use sacp::{ProxyToConductor, mcp_server::McpServer};
 mod component;
 pub mod error;
 mod mcp;
-pub mod rust;
+mod rust;
 
 pub use component::FerrisComponent;
 pub use error::{FerrisError, Result};
-pub use rust::FetchResult;
+pub use rust::{FetchResult, RustCrateFetch};
 
 /// Ferris - Rust development tools
 ///
