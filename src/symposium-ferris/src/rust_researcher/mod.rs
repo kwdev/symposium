@@ -11,7 +11,8 @@ use sacp::{
     ProxyToConductor,
     mcp_server::{McpContext, McpServerBuilder},
     schema::{
-        RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse, StopReason,
+        RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+        SelectedPermissionOutcome, StopReason,
     },
     util::MatchMessage,
 };
@@ -166,7 +167,8 @@ async fn run_research(
                         StopReason::MaxTokens
                         | StopReason::MaxTurnRequests
                         | StopReason::Refusal
-                        | StopReason::Cancelled => {
+                        | StopReason::Cancelled
+                        | _ => {
                             return Err(sacp::util::internal_error(format!(
                                 "researcher stopped early: {stop_reason:?}"
                             )));
@@ -192,15 +194,15 @@ fn approve_tool_request(
             sacp::schema::PermissionOptionKind::AllowOnce
             | sacp::schema::PermissionOptionKind::AllowAlways => true,
             sacp::schema::PermissionOptionKind::RejectOnce
-            | sacp::schema::PermissionOptionKind::RejectAlways => false,
+            | sacp::schema::PermissionOptionKind::RejectAlways
+            | _ => false,
         })
-        .map(|option| RequestPermissionOutcome::Selected {
-            option_id: option.id.clone(),
+        .map(|option| {
+            RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
+                option.option_id.clone(),
+            ))
         })
         .unwrap_or(RequestPermissionOutcome::Cancelled);
 
-    request_cx.respond(RequestPermissionResponse {
-        outcome,
-        meta: None,
-    })
+    request_cx.respond(RequestPermissionResponse::new(outcome))
 }
