@@ -20,7 +20,7 @@ sacp-rmcp = "10.0.0"
 sacp-tee = "10.0.0"
 sacp-test = "10.0.0"
 yopo = "10.0.0"
-elizacp = "10.0.0"
+elizacp = "11.0.0"
 jsonrpcmsg = "0.1.2"
 
 # Core async runtime
