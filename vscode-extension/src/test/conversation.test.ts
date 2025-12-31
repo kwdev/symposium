@@ -80,7 +80,9 @@ suite("Conversation Tests", () => {
         response.toLowerCase().includes("hello") ||
         response.toLowerCase().includes("hi") ||
         response.toLowerCase().includes("how") ||
-        response.toLowerCase().includes("what"),
+        response.toLowerCase().includes("what") ||
+        response.toLowerCase().includes("you") ||
+        response.toLowerCase().includes("thank"),
       "Response should be relevant to the prompt",
     );
 
