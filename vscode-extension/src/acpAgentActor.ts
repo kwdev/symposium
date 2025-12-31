@@ -244,16 +244,21 @@ export class AcpAgentActor {
       spawnArgs.push("--log", agentLogLevel);
     }
 
+    const traceDir = vsConfig.get<string>("traceDir", "");
+    if (traceDir) {
+      spawnArgs.push("--trace-dir", traceDir);
+    }
+
     if (resolved.isSymposiumBuiltin) {
-      // Symposium builtin (e.g., eliza) - run conductor with subcommand directly
-      spawnArgs.push(resolved.command, ...resolved.args);
+      // Symposium builtin (e.g., eliza) - wrap with conductor using the same binary
+      spawnArgs.push(
+        "--",
+        conductorCommand,
+        resolved.command,
+        ...resolved.args,
+      );
     } else {
       // External agent - wrap with conductor
-      const traceDir = vsConfig.get<string>("traceDir", "");
-      if (traceDir) {
-        spawnArgs.push("--trace-dir", traceDir);
-      }
-
       spawnArgs.push("--", resolved.command, ...resolved.args);
     }
 
