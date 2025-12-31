@@ -10,6 +10,7 @@ import { Writable, Readable } from "stream";
 import * as acp from "@agentclientprotocol/sdk";
 import * as vscode from "vscode";
 import { AgentConfiguration } from "./agentConfiguration";
+import { getAgentById, resolveDistribution } from "./agentRegistry";
 import { logger } from "./extension";
 
 /**
@@ -216,34 +217,18 @@ export class AcpAgentActor {
     const vsConfig = vscode.workspace.getConfiguration("symposium");
 
     // Get the agent definition
-    const agents = vsConfig.get<
-      Record<
-        string,
-        { command: string; args?: string[]; env?: Record<string, string> }
-      >
-    >("agents", {});
-    const agent = agents[config.agentName];
+    const agent = getAgentById(config.agentId);
 
     if (!agent) {
       throw new Error(
-        `Agent "${config.agentName}" not found in configured agents`,
+        `Agent "${config.agentId}" not found in configured agents`,
       );
     }
 
-    // Build the agent command with its arguments
-    const agentCmd = agent.command;
-    const agentArgs = agent.args || [];
+    // Resolve distribution to command and args
+    const resolved = await resolveDistribution(agent);
 
-    // Build conductor arguments: [--trace-dir <dir>] -- <agent-command> [agent-args...]
-    const conductorArgs: string[] = [];
-
-    // Add trace directory if configured
-    const traceDir = vsConfig.get<string>("traceDir", "");
-    if (traceDir) {
-      conductorArgs.push("--trace-dir", traceDir);
-    }
-
-    // Add log level if configured, or inherit from general logLevel if set to debug
+    // Get log level if configured
     let agentLogLevel = vsConfig.get<string>("agentLogLevel", "");
     if (!agentLogLevel) {
       const generalLogLevel = vsConfig.get<string>("logLevel", "error");
@@ -251,30 +236,39 @@ export class AcpAgentActor {
         agentLogLevel = "debug";
       }
     }
+
+    // Build the spawn command and args
+    const spawnArgs: string[] = [];
+
     if (agentLogLevel) {
-      conductorArgs.push("--log", agentLogLevel);
+      spawnArgs.push("--log", agentLogLevel);
     }
 
-    // Add component disable flags if components are disabled
-    if (!config.enableSparkle) {
-      conductorArgs.push("--no-sparkle");
-    }
-    if (!config.enableCrateResearcher) {
-      conductorArgs.push("--no-crate-researcher");
-    }
+    if (resolved.isSymposiumBuiltin) {
+      // Symposium builtin (e.g., eliza) - run conductor with subcommand directly
+      spawnArgs.push(resolved.command, ...resolved.args);
+    } else {
+      // External agent - wrap with conductor
+      const traceDir = vsConfig.get<string>("traceDir", "");
+      if (traceDir) {
+        spawnArgs.push("--trace-dir", traceDir);
+      }
 
-    conductorArgs.push("--", agentCmd, ...agentArgs);
+      spawnArgs.push("--", resolved.command, ...resolved.args);
+    }
 
     logger.important("agent", "Spawning ACP agent", {
       command: conductorCommand,
-      args: conductorArgs,
+      args: spawnArgs,
     });
 
-    // Merge environment variables
-    const env = agent.env ? { ...process.env, ...agent.env } : process.env;
+    // Merge environment variables (from resolved distribution if any)
+    const env = resolved.env
+      ? { ...process.env, ...resolved.env }
+      : process.env;
 
     // Spawn the agent process
-    this.agentProcess = spawn(conductorCommand, conductorArgs, {
+    this.agentProcess = spawn(conductorCommand, spawnArgs, {
       stdio: ["pipe", "pipe", "pipe"],
       env: env as NodeJS.ProcessEnv,
     });

@@ -1,31 +1,28 @@
 import * as vscode from "vscode";
+import {
+  getAgentById,
+  getCurrentAgentId,
+  DEFAULT_AGENT_ID,
+} from "./agentRegistry";
 
 /**
  * AgentConfiguration - Identifies a unique agent setup
  *
- * Consists of the base agent name and workspace folder.
+ * Consists of the agent ID and workspace folder.
  * Tabs with the same configuration can share an ACP agent process.
  */
 
 export class AgentConfiguration {
   constructor(
-    public readonly agentName: string,
+    public readonly agentId: string,
     public readonly workspaceFolder: vscode.WorkspaceFolder,
-    public readonly enableSparkle: boolean = true,
-    public readonly enableCrateResearcher: boolean = true,
   ) {}
 
   /**
    * Get a unique key for this configuration
    */
   key(): string {
-    const components = [
-      this.enableSparkle ? "sparkle" : "",
-      this.enableCrateResearcher ? "crate-researcher" : "",
-    ]
-      .filter((c) => c)
-      .join("+");
-    return `${this.agentName}:${this.workspaceFolder.uri.fsPath}:${components}`;
+    return `${this.agentId}:${this.workspaceFolder.uri.fsPath}`;
   }
 
   /**
@@ -39,15 +36,8 @@ export class AgentConfiguration {
    * Get a human-readable description
    */
   describe(): string {
-    const components = [
-      this.enableSparkle ? "Sparkle" : null,
-      this.enableCrateResearcher ? "Rust Crate Researcher" : null,
-    ].filter((c) => c !== null);
-
-    if (components.length === 0) {
-      return this.agentName;
-    }
-    return `${this.agentName} + ${components.join(" + ")}`;
+    const agent = getAgentById(this.agentId);
+    return agent?.name ?? this.agentId;
   }
 
   /**
@@ -57,17 +47,8 @@ export class AgentConfiguration {
   static async fromSettings(
     workspaceFolder?: vscode.WorkspaceFolder,
   ): Promise<AgentConfiguration> {
-    const config = vscode.workspace.getConfiguration("symposium");
-
-    // Get current agent
-    const currentAgentName = config.get<string>("currentAgent", "Claude Code");
-
-    // Get component settings
-    const enableSparkle = config.get<boolean>("enableSparkle", true);
-    const enableCrateResearcher = config.get<boolean>(
-      "enableCrateResearcher",
-      true,
-    );
+    // Get current agent ID
+    const currentAgentId = getCurrentAgentId();
 
     // Determine workspace folder
     let folder = workspaceFolder;
@@ -89,11 +70,6 @@ export class AgentConfiguration {
       }
     }
 
-    return new AgentConfiguration(
-      currentAgentName,
-      folder,
-      enableSparkle,
-      enableCrateResearcher,
-    );
+    return new AgentConfiguration(currentAgentId, folder);
   }
 }

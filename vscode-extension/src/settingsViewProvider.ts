@@ -1,4 +1,10 @@
 import * as vscode from "vscode";
+import {
+  getEffectiveAgents,
+  getCurrentAgentId,
+  AgentConfig,
+  checkForRegistryUpdates,
+} from "./agentRegistry";
 
 export class SettingsViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = "symposium.settingsView";
@@ -47,10 +53,10 @@ export class SettingsViewProvider implements vscode.WebviewViewProvider {
           break;
         case "set-current-agent":
           // Update current agent setting
-          const config = vscode.workspace.getConfiguration("symposium");
-          await config.update(
-            "currentAgent",
-            message.agentName,
+          const vsConfig = vscode.workspace.getConfiguration("symposium");
+          await vsConfig.update(
+            "currentAgentId",
+            message.agentId,
             vscode.ConfigurationTarget.Global,
           );
           vscode.window.showInformationMessage(
@@ -62,7 +68,7 @@ export class SettingsViewProvider implements vscode.WebviewViewProvider {
 
         case "toggle-bypass-permissions":
           // Toggle bypass permissions for an agent
-          await this.#toggleBypassPermissions(message.agentName);
+          await this.#toggleBypassPermissions(message.agentId);
           break;
         case "open-settings":
           // Open VSCode settings focused on Symposium
@@ -71,31 +77,43 @@ export class SettingsViewProvider implements vscode.WebviewViewProvider {
             "symposium",
           );
           break;
+        case "add-agent-from-registry":
+          // Show the add agent from registry dialog
+          vscode.commands.executeCommand("symposium.addAgentFromRegistry");
+          break;
+        case "check-for-updates":
+          // Check for registry updates
+          await this.#checkForUpdates();
+          break;
         case "toggle-require-modifier-to-send":
           // Toggle the requireModifierToSend setting
           await this.#toggleRequireModifierToSend();
-          break;
-        case "toggle-component":
-          // Toggle a component enabled/disabled
-          await this.#toggleComponentSetting(message.componentId);
           break;
       }
     });
   }
 
-  async #toggleBypassPermissions(agentName: string) {
+  async #toggleBypassPermissions(agentId: string) {
     const config = vscode.workspace.getConfiguration("symposium");
     const agents = config.get<Record<string, any>>("agents", {});
 
-    if (agents[agentName]) {
-      const currentValue = agents[agentName].bypassPermissions || false;
-      agents[agentName].bypassPermissions = !currentValue;
-      await config.update("agents", agents, vscode.ConfigurationTarget.Global);
-      vscode.window.showInformationMessage(
-        `${agentName}: Bypass permissions ${!currentValue ? "enabled" : "disabled"}`,
-      );
-      this.#sendConfiguration();
+    // Get the agent to find its display name
+    const effectiveAgents = getEffectiveAgents();
+    const agent = effectiveAgents.find((a) => a.id === agentId);
+    const displayName = agent?.name ?? agentId;
+
+    // Initialize agent entry in settings if it doesn't exist
+    if (!agents[agentId]) {
+      agents[agentId] = {};
     }
+
+    const currentValue = agents[agentId].bypassPermissions || false;
+    agents[agentId].bypassPermissions = !currentValue;
+    await config.update("agents", agents, vscode.ConfigurationTarget.Global);
+    vscode.window.showInformationMessage(
+      `${displayName}: Bypass permissions ${!currentValue ? "enabled" : "disabled"}`,
+    );
+    this.#sendConfiguration();
   }
 
   async #toggleRequireModifierToSend() {
@@ -109,17 +127,38 @@ export class SettingsViewProvider implements vscode.WebviewViewProvider {
     this.#sendConfiguration();
   }
 
-  async #toggleComponentSetting(componentId: string) {
-    const config = vscode.workspace.getConfiguration("symposium");
-    const settingName =
-      componentId === "sparkle" ? "enableSparkle" : "enableCrateResearcher";
-    const currentValue = config.get<boolean>(settingName, true);
-    await config.update(
-      settingName,
-      !currentValue,
-      vscode.ConfigurationTarget.Global,
+  async #checkForUpdates() {
+    const result = await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: "Checking for agent updates...",
+        cancellable: false,
+      },
+      async () => {
+        try {
+          return await checkForRegistryUpdates();
+        } catch (error) {
+          vscode.window.showErrorMessage(
+            `Failed to check for updates: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          return null;
+        }
+      },
     );
-    this.#sendConfiguration();
+
+    if (result === null) {
+      return;
+    }
+
+    if (result.updated.length === 0) {
+      vscode.window.showInformationMessage("All agents are up to date.");
+    } else {
+      vscode.window.showInformationMessage(
+        `Updated ${result.updated.length} agent(s): ${result.updated.join(", ")}`,
+      );
+      // Refresh the UI to show new versions
+      this.#sendConfiguration();
+    }
   }
 
   #sendConfiguration() {
@@ -128,25 +167,26 @@ export class SettingsViewProvider implements vscode.WebviewViewProvider {
     }
 
     const config = vscode.workspace.getConfiguration("symposium");
-    const agents = config.get("agents", {});
-    const currentAgent = config.get("currentAgent", "");
+    const settingsAgents = config.get<Record<string, any>>("agents", {});
+
+    // Get effective agents (built-ins + settings) and merge bypass settings
+    const effectiveAgents = getEffectiveAgents();
+    const agents = effectiveAgents.map((agent) => ({
+      ...agent,
+      bypassPermissions: settingsAgents[agent.id]?.bypassPermissions ?? false,
+    }));
+
+    const currentAgentId = getCurrentAgentId();
     const requireModifierToSend = config.get<boolean>(
       "requireModifierToSend",
       false,
-    );
-    const enableSparkle = config.get<boolean>("enableSparkle", true);
-    const enableCrateResearcher = config.get<boolean>(
-      "enableCrateResearcher",
-      true,
     );
 
     this.#view.webview.postMessage({
       type: "config",
       agents,
-      currentAgent,
+      currentAgentId,
       requireModifierToSend,
-      enableSparkle,
-      enableCrateResearcher,
     });
   }
 
@@ -186,6 +226,15 @@ export class SettingsViewProvider implements vscode.WebviewViewProvider {
             display: flex;
             justify-content: space-between;
             align-items: center;
+        }
+        .agent-name {
+            display: flex;
+            align-items: baseline;
+            gap: 6px;
+        }
+        .agent-version {
+            font-size: 11px;
+            color: var(--vscode-descriptionForeground);
         }
         .agent-item:hover {
             background: var(--vscode-list-hoverBackground);
@@ -245,27 +294,13 @@ export class SettingsViewProvider implements vscode.WebviewViewProvider {
         <div class="agent-list" id="agent-list">
             <div>Loading...</div>
         </div>
-    </div>
-
-    <div class="section">
-        <h2>Components</h2>
-        <div class="checkbox-item">
-            <input type="checkbox" id="component-sparkle" />
-            <label for="component-sparkle">
-                <div>Sparkle</div>
-                <div class="checkbox-description">
-                    Collaborative AI identity and memory.
-                </div>
-            </label>
-        </div>
-        <div class="checkbox-item">
-            <input type="checkbox" id="component-crate-researcher" />
-            <label for="component-crate-researcher">
-                <div>Rust Crate Researcher</div>
-                <div class="checkbox-description">
-                    Rust crate documentation lookup.
-                </div>
-            </label>
+        <div style="margin-top: 12px; display: flex; flex-direction: column; gap: 6px;">
+            <a href="#" id="add-agent-link" style="color: var(--vscode-textLink-foreground); text-decoration: none;">
+                + Add agent from registry...
+            </a>
+            <a href="#" id="check-updates-link" style="color: var(--vscode-textLink-foreground); text-decoration: none;">
+                ↻ Check for updates
+            </a>
         </div>
     </div>
 
@@ -284,7 +319,7 @@ export class SettingsViewProvider implements vscode.WebviewViewProvider {
 
     <div class="section">
         <a href="#" id="configure-link" style="color: var(--vscode-textLink-foreground); text-decoration: none;">
-            Configure agents and components...
+            Configure agents...
         </a>
     </div>
 
@@ -300,17 +335,21 @@ export class SettingsViewProvider implements vscode.WebviewViewProvider {
             vscode.postMessage({ type: 'open-settings' });
         };
 
+        // Handle add agent link
+        document.getElementById('add-agent-link').onclick = (e) => {
+            e.preventDefault();
+            vscode.postMessage({ type: 'add-agent-from-registry' });
+        };
+
+        // Handle check for updates link
+        document.getElementById('check-updates-link').onclick = (e) => {
+            e.preventDefault();
+            vscode.postMessage({ type: 'check-for-updates' });
+        };
+
         // Handle require modifier to send checkbox
         document.getElementById('require-modifier-to-send').onchange = (e) => {
             vscode.postMessage({ type: 'toggle-require-modifier-to-send' });
-        };
-
-        // Handle component checkboxes
-        document.getElementById('component-sparkle').onchange = (e) => {
-            vscode.postMessage({ type: 'toggle-component', componentId: 'sparkle' });
-        };
-        document.getElementById('component-crate-researcher').onchange = (e) => {
-            vscode.postMessage({ type: 'toggle-component', componentId: 'crate-researcher' });
         };
 
         // Handle messages from extension
@@ -318,48 +357,52 @@ export class SettingsViewProvider implements vscode.WebviewViewProvider {
             const message = event.data;
 
             if (message.type === 'config') {
-                renderAgents(message.agents, message.currentAgent);
-                renderComponents(message.enableSparkle, message.enableCrateResearcher);
+                renderAgents(message.agents, message.currentAgentId);
                 renderPreferences(message.requireModifierToSend);
             }
         });
-
-        function renderComponents(enableSparkle, enableCrateResearcher) {
-            document.getElementById('component-sparkle').checked = enableSparkle;
-            document.getElementById('component-crate-researcher').checked = enableCrateResearcher;
-        }
 
         function renderPreferences(requireModifierToSend) {
             const checkbox = document.getElementById('require-modifier-to-send');
             checkbox.checked = requireModifierToSend;
         }
 
-        function renderAgents(agents, currentAgent) {
+        function renderAgents(agents, currentAgentId) {
             const list = document.getElementById('agent-list');
             list.innerHTML = '';
 
-            for (const [name, config] of Object.entries(agents)) {
+            for (const agent of agents) {
+                const displayName = agent.name || agent.id;
+                const isActive = agent.id === currentAgentId;
+
                 const item = document.createElement('div');
-                item.className = 'agent-item' + (name === currentAgent ? ' active' : '');
+                item.className = 'agent-item' + (isActive ? ' active' : '');
 
                 const badges = [];
-                if (name === currentAgent) {
+                if (isActive) {
                     badges.push('<span class="badge">Active</span>');
                 }
-                if (config.bypassPermissions) {
+                if (agent.bypassPermissions) {
                     badges.push('<span class="badge bypass" title="Click to disable bypass permissions">Bypass Permissions</span>');
                 }
 
+                const versionHtml = agent.version
+                    ? \`<span class="agent-version">v\${agent.version}</span>\`
+                    : '';
+
                 item.innerHTML = \`
-                    <span>\${name}</span>
+                    <div class="agent-name">
+                        <span>\${displayName}</span>
+                        \${versionHtml}
+                    </div>
                     <div class="badges">\${badges.join('')}</div>
                 \`;
 
                 // Handle clicking on the agent name (switch agent)
-                const nameSpan = item.querySelector('span:first-child');
+                const nameSpan = item.querySelector('.agent-name');
                 nameSpan.onclick = (e) => {
                     e.stopPropagation();
-                    vscode.postMessage({ type: 'set-current-agent', agentName: name });
+                    vscode.postMessage({ type: 'set-current-agent', agentId: agent.id, agentName: displayName });
                 };
 
                 // Handle clicking on the bypass badge (toggle bypass)
@@ -367,7 +410,7 @@ export class SettingsViewProvider implements vscode.WebviewViewProvider {
                 if (bypassBadge) {
                     bypassBadge.onclick = (e) => {
                         e.stopPropagation();
-                        vscode.postMessage({ type: 'toggle-bypass-permissions', agentName: name });
+                        vscode.postMessage({ type: 'toggle-bypass-permissions', agentId: agent.id });
                     };
                 }
 
