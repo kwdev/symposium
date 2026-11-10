@@ -1,0 +1,28 @@
+# Symposium's Anchor Book: its design, authority, and agreed work.
+# The user Book is configured separately in the repository root's book.toml.
+[book]
+title = "Symposium Anchor Book"
+description = "The design and development of Symposium."
+language = "en"
+src = "src"
+
+[build]
+build-dir = "../target/anchorbook"
+create-missing = false
+
+[output.html]
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
+git-repository-url = "https://github.com/symposium-dev/symposium"
+
+[output.html.fold]
+enable = true
+level = 1
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
+
+[preprocessor.anchorbook]
+command = "anchorbook md"
+config = "../anchorbook.toml"
+after = ["links"]
+before = ["mermaid"]

@@ -1,0 +1,14 @@
+schema-version = 1
+
+[project]
+phase = "prototyping"
+
+[book]
+source = "anchor-book/src"
+output = "target/anchorbook"
+mdbook = "anchor-book/book.toml"
+
+[book.sections]
+design = "design/index.md"
+authority = "authority/index.md"
+implementation-roadmaps = "implementation-roadmaps/index.md"
