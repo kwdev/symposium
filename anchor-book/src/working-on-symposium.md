@@ -54,6 +54,30 @@ renders nothing if it fails. The user Book still builds with `mdbook build` from
 the repository root. Symposium's own build and test commands are in
 [Running tests](https://github.com/symposium-dev/symposium/blob/main/md/design/running-tests.md).
 
+## Design areas not yet in this Book
+
+This Book covers the design areas its [Design](design/index.md) section lists.
+The others are still described only in the user Book's contribution guide,
+`md/design/`. Read the relevant chapter there before changing an area this Book
+does not cover; `md/design/module-structure.md` and `md/design/important-flows.md`
+are the best overview of the code. Requests for discussion (RFDs) are in
+`md/rfds/`; the `authoring-rfds` skill in `.agents/skills/` describes how to write one.
+
+## Symposium's working rules
+
+- **Check common issues first.** Before a coding task, review
+  `md/design/common-issues.md` for recurring bug patterns that may apply.
+- **Keep the design current.** Update the design alongside the code: this Book's
+  chapter for an area it covers, and `md/design/` for the others. An area adapted
+  into this Book is also still described in `md/design/`; keep the two consistent
+  until the maintainers decide which one is kept.
+- **Build and test.** After changes, run `cargo fmt --all`, `cargo clippy --all
+  --workspace`, and `cargo test --all --workspace`.
+  [Running tests](https://github.com/symposium-dev/symposium/blob/main/md/design/running-tests.md)
+  describes agent-mode tests and test filtering.
+- **Commits.** Include a `Co-authored-by` trailer with your agent identifier,
+  such as `Claude <claude@anthropic.com>`, to indicate AI collaboration.
+
 ## Contribution workflow
 
 This Book is a trial on a branch of a fork of Symposium. Whether Symposium adopts

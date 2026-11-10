@@ -1,26 +1,23 @@
-# Project
+# Start here
 
-## Introduction
+This repository develops Symposium. Its design, governing records, and agreed
+work are in its Anchor Book in `anchor-book/`; the user documentation is a
+separate Book in `md/`.
 
-@md/introduction.md
+Before project work, run this from the repository root and read its output in full:
 
-## Documentation
+```sh
+anchorbook contract
+```
 
-Design documentation is tracked in the mdbook:
+It prints the AI Working Contract for the engine revision this project pins. If
+`anchorbook` is not installed, install the revision named in
+[Working on Symposium](anchor-book/src/working-on-symposium.md#tools-and-commands)
+first. Then read that chapter for project guidance. The Book index is
+[anchor-book/src/SUMMARY.md](anchor-book/src/SUMMARY.md); read every chapter it
+lists before taking up the engineer's task. Paths here are relative to this
+repository root, regardless of your current working directory.
 
-@md/SUMMARY.md
-
-The module structure and important flows chapters are particularly useful for understanding the codebase:
-
-@md/design/module-structure.md
-
-@md/design/important-flows.md
-
-## Instructions
-
-Agent MUST follow the following guidance:
-
-* **Check common issues first**: Before starting a coding task, review `md/design/common-issues.md` for recurring bug patterns that may apply to your work.
-* **Update design documentation**: Update the mdbook chapters in `md/design` as appropriate so that they are kept current. This will help both you and future agents to remember how things work.
-* **Check that everything builds and don't forget tests**: After making changes, remember to check that the typescript + swift + Rust code builds and to run tests.
-* **Co-authorship**: Include "Co-authored-by" with your agent identifier (e.g., "Claude <claude@anthropic.com>") to indicate AI collaboration.
+If the contract cannot be retrieved, report the problem before proceeding with
+work that depends on it. Retrieve it again in a new session, after losing its
+context, or when it changes.
