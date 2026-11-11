@@ -12,15 +12,15 @@ The Book's sources are under `anchor-book/src/`, with navigation in
 checkout. Generated output goes to `target/anchorbook/`. The user Book in `md/`
 and its root `book.toml` are separate and unchanged by work on this Book.
 
-Records are written in the engine's current record form, as described in the
-Anchor Book engine's
-[Current implementation](https://github.com/anchor-book/anchor-book/blob/2af5c894bc531b01b3450ecff82b4c35da6e8a3b/book/design/anchor-definitions.md#current-implementation):
-fenced `anchorbook-anchor`, `anchorbook-requirement`, and `anchorbook-decision`
-blocks containing TOML. Follow the existing records in this Book.
-Requirement and decision identifiers carry `requirement-` and `decision-`
-prefixes; anchor identifiers start with their capability word, such as `config`.
+Records are written in the engine's
+[record syntax](https://github.com/anchor-book/anchor-book/blob/1b8274ec2460b63419e9b310606ef67de04efbbe/book/design/anchor-definitions.md#record-syntax),
+with requirements and decisions as its
+[Authority Definitions](https://github.com/anchor-book/anchor-book/blob/1b8274ec2460b63419e9b310606ef67de04efbbe/book/design/authority-definitions.md)
+describe; follow the existing records in this Book. Identifiers carry their kind
+code: `A-` for anchors, followed by the capability word, such as
+`A-config-directory-resolution`; `R-` for requirements; and `D-` for decisions.
 Roadmaps follow the engine's
-[roadmap format](https://github.com/anchor-book/anchor-book/blob/2af5c894bc531b01b3450ecff82b4c35da6e8a3b/book/implementation-roadmaps/index.md#defining-the-work).
+[roadmap format](https://github.com/anchor-book/anchor-book/blob/1b8274ec2460b63419e9b310606ef67de04efbbe/book/implementation-roadmaps/index.md#defining-the-work).
 
 ## Current phase
 
@@ -34,7 +34,7 @@ engine supports. Install them once:
 
 ```sh
 cargo install --git https://github.com/anchor-book/anchor-book \
-  --rev 2af5c894bc531b01b3450ecff82b4c35da6e8a3b --locked anchor-book
+  --rev 1b8274ec2460b63419e9b310606ef67de04efbbe --locked anchor-book
 cargo install mdbook --version 0.5.4 --locked
 cargo install mdbook-mermaid --version 0.17.1 --locked
 ```

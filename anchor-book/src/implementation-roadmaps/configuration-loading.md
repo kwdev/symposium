@@ -34,21 +34,21 @@ implemented; this roadmap closes the gaps between existing tests and the criteri
 
 Tests cover every row of the resolution table, empty variables, and relative XDG values.
 
-- **Anchor coverage:** [config-directory-resolution](../design/configuration-loading.md#config-directory-resolution) · `precedence`, `empty-and-relative` — Full.
+- **Anchor coverage:** [A-config-directory-resolution](../design/configuration-loading.md#A-config-directory-resolution) · `precedence`, `empty-and-relative` — Full.
 - **Evidence:** Pending.
 
 #### Unreadable file tests {#configuration-loading-1-unreadable-file}
 
 Tests show every saving command and `sync` refusing an unparseable configuration without changing it, and a missing or empty file loading and saving defaults.
 
-- **Anchor coverage:** [config-unreadable-file-unchanged](../design/configuration-loading.md#config-unreadable-file-unchanged) · `save-refused`, `commands-refuse`, `missing-file-saved` — Full.
+- **Anchor coverage:** [A-config-unreadable-file-unchanged](../design/configuration-loading.md#A-config-unreadable-file-unchanged) · `save-refused`, `commands-refuse`, `missing-file-saved` — Full.
 - **Evidence:** Pending.
 
 #### Run continues tests {#configuration-loading-1-run-continues}
 
 Tests show the defaults with auto-update off, the warning, and a hook event completing with an unparseable configuration.
 
-- **Anchor coverage:** [config-unreadable-run-continues](../design/configuration-loading.md#config-unreadable-run-continues) · `auto-update-off`, `hooks-continue` — Full.
+- **Anchor coverage:** [A-config-unreadable-run-continues](../design/configuration-loading.md#A-config-unreadable-run-continues) · `auto-update-off`, `hooks-continue` — Full.
 - **Evidence:** Pending.
 
 ### Completion record
