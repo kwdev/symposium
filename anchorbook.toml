@@ -12,3 +12,11 @@ mdbook = "anchor-book/book.toml"
 design = "design/index.md"
 authority = "authority/index.md"
 implementation-roadmaps = "implementation-roadmaps/index.md"
+
+[verification]
+sources = [
+  "src", "tests", "symposium-eval/src", "symposium-testlib/src",
+  "symposium-install/src", "symposium-sdk/src", "symposium-pm-cargo/src", "xtask/src",
+]
+output = "target/anchorbook-verify"
+runners = ["nextest"]

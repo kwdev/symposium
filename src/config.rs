@@ -943,6 +943,7 @@ mod tests {
             .unwrap()
     }
 
+    /// anchorbook: A-config-unreadable-file-unchanged#missing-file-saved
     #[test]
     fn parse_empty_config() {
         let config = parse_config("");
@@ -1065,6 +1066,7 @@ mod tests {
         assert!(!sym.config.defaults.symposium_recommendations);
     }
 
+    /// anchorbook: A-config-unreadable-file-unchanged#save-refused
     #[test]
     fn unparseable_config_is_never_saved() {
         for contents in [
@@ -1089,11 +1091,13 @@ mod tests {
             std::fs::write(&path, contents).unwrap();
             let sym = Symposium::from_dir(tmp.path());
             assert_eq!(sym.config.auto_update, AutoUpdate::Off);
-            assert!(sym.save_config().is_err());
+            let error = sym.save_config().unwrap_err();
+            assert!(error.to_string().contains(&path.display().to_string()));
             assert_eq!(std::fs::read_to_string(&path).unwrap(), contents);
         }
     }
 
+    /// anchorbook: A-config-unreadable-file-unchanged#save-refused
     #[test]
     fn unreadable_config_is_never_saved() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1101,10 +1105,12 @@ mod tests {
         std::fs::write(&path, b"\xff\xfe").unwrap();
         let sym = Symposium::from_dir(tmp.path());
         assert_eq!(sym.config.auto_update, AutoUpdate::Off);
-        assert!(sym.save_config().is_err());
+        let error = sym.save_config().unwrap_err();
+        assert!(error.to_string().contains(&path.display().to_string()));
         assert_eq!(std::fs::read(&path).unwrap(), b"\xff\xfe");
     }
 
+    /// anchorbook: A-config-unreadable-file-unchanged#missing-file-saved
     #[test]
     fn missing_config_is_saved() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1347,6 +1353,7 @@ mod tests {
         );
     }
 
+    /// anchorbook: A-config-directory-resolution#precedence
     #[test]
     fn resolve_logs_dir_uses_xdg_state_home() {
         let tmp = tempfile::tempdir().unwrap();

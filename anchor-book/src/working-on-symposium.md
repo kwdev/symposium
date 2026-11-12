@@ -13,14 +13,14 @@ checkout. Generated output goes to `target/anchorbook/`. The user Book in `md/`
 and its root `book.toml` are separate and unchanged by work on this Book.
 
 Records are written in the engine's
-[record syntax](https://github.com/anchor-book/anchor-book/blob/1b8274ec2460b63419e9b310606ef67de04efbbe/book/design/anchor-definitions.md#record-syntax),
+[record syntax](https://github.com/anchor-book/anchor-book/blob/b7bcd33d0035fdc6af9790e0fd8568394772afb9/book/design/anchor-definitions.md#record-syntax),
 with requirements and decisions as its
-[Authority Definitions](https://github.com/anchor-book/anchor-book/blob/1b8274ec2460b63419e9b310606ef67de04efbbe/book/design/authority-definitions.md)
+[Authority Definitions](https://github.com/anchor-book/anchor-book/blob/b7bcd33d0035fdc6af9790e0fd8568394772afb9/book/design/authority-definitions.md)
 describe; follow the existing records in this Book. Identifiers carry their kind
 code: `A-` for anchors, followed by the capability word, such as
 `A-config-directory-resolution`; `R-` for requirements; and `D-` for decisions.
 Roadmaps follow the engine's
-[roadmap format](https://github.com/anchor-book/anchor-book/blob/1b8274ec2460b63419e9b310606ef67de04efbbe/book/implementation-roadmaps/index.md#defining-the-work).
+[roadmap format](https://github.com/anchor-book/anchor-book/blob/b7bcd33d0035fdc6af9790e0fd8568394772afb9/book/implementation-roadmaps/index.md#defining-the-work).
 
 ## Current phase
 
@@ -34,9 +34,10 @@ engine supports. Install them once:
 
 ```sh
 cargo install --git https://github.com/anchor-book/anchor-book \
-  --rev 1b8274ec2460b63419e9b310606ef67de04efbbe --locked anchor-book
+  --rev b7bcd33d0035fdc6af9790e0fd8568394772afb9 --locked anchor-book
 cargo install mdbook --version 0.5.4 --locked
 cargo install mdbook-mermaid --version 0.17.1 --locked
+cargo install cargo-nextest --version 0.9.151 --locked
 ```
 
 Give `--rev` the full commit hash; Cargo does not resolve a shortened one.
@@ -46,6 +47,8 @@ From the repository root:
 | --- | --- |
 | Read the working contract | `anchorbook contract` |
 | Check the Book's structure | `anchorbook check --config anchorbook.toml` |
+| Check current test evidence | `anchorbook verify --config anchorbook.toml --method test` |
+| Check one configuration anchor | `anchorbook verify --config anchorbook.toml --anchor A-config-unreadable-file-unchanged --method test` |
 | Build the Book | `mdbook build anchor-book` |
 | Preview the Book | `mdbook serve anchor-book --hostname 127.0.0.1 --port 3000` |
 
@@ -53,6 +56,18 @@ From the repository root:
 renders nothing if it fails. The user Book still builds with `mdbook build` from
 the repository root. Symposium's own build and test commands are in
 [Running tests](https://github.com/symposium-dev/symposium/blob/main/md/design/running-tests.md).
+
+`verify` runs linked tests through nextest. Its `satisfied` state means those
+tests passed; the [coverage assessment](implementation-roadmaps/configuration-loading.md#configuration-loading-1-trial)
+records what they leave out. The configuration milestone remains open. A failing
+linked test still permits exit 0 while no Complete milestone claims its criterion;
+read the criterion states as well as the process status.
+
+Agent-only tests currently return `ok` when no agent runs, and this engine also
+reports them satisfied. They are not linked as evidence in this Book. The trial
+records the defect; agent execution needs a current result the runner can
+distinguish before those tests can supply evidence. Ordinary simulation tests
+remain usable without enabling agent testing.
 
 ## Design areas not yet in this Book
 

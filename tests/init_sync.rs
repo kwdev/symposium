@@ -212,6 +212,7 @@ async fn non_interactive_init_defaults_to_claude() {
     .unwrap();
 }
 
+/// anchorbook: A-config-unreadable-file-unchanged#commands-refuse
 #[tokio::test]
 async fn init_does_not_overwrite_an_unparseable_config() {
     with_fixture(TestMode::SimulationOnly, &[], async |mut ctx| {
@@ -2801,6 +2802,7 @@ async fn auto_update_re_execs_on_hook() {
     assert_surprise(&output);
 }
 
+/// anchorbook: A-config-unreadable-run-continues#auto-update-off
 #[tokio::test]
 #[cfg_attr(
     windows,
@@ -3626,6 +3628,7 @@ async fn sync_installs_skills_from_a_symlinked_group_directory() {
     .unwrap();
 }
 
+/// anchorbook: A-config-directory-resolution#empty-and-relative
 #[cfg(unix)]
 #[test]
 fn empty_env_dirs_are_ignored() {
