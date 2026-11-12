@@ -13,14 +13,14 @@ checkout. Generated output goes to `target/anchorbook/`. The user Book in `md/`
 and its root `book.toml` are separate and unchanged by work on this Book.
 
 Records are written in the engine's
-[record syntax](https://github.com/anchor-book/anchor-book/blob/b7bcd33d0035fdc6af9790e0fd8568394772afb9/book/design/anchor-definitions.md#record-syntax),
+[record syntax](https://github.com/anchor-book/anchor-book/blob/7a3c1019ed18ac9fa92b99d683c44228ad7b1a6f/book/design/anchor-definitions.md#record-syntax),
 with requirements and decisions as its
-[Authority Definitions](https://github.com/anchor-book/anchor-book/blob/b7bcd33d0035fdc6af9790e0fd8568394772afb9/book/design/authority-definitions.md)
+[Authority Definitions](https://github.com/anchor-book/anchor-book/blob/7a3c1019ed18ac9fa92b99d683c44228ad7b1a6f/book/design/authority-definitions.md)
 describe; follow the existing records in this Book. Identifiers carry their kind
 code: `A-` for anchors, followed by the capability word, such as
 `A-config-directory-resolution`; `R-` for requirements; and `D-` for decisions.
 Roadmaps follow the engine's
-[roadmap format](https://github.com/anchor-book/anchor-book/blob/b7bcd33d0035fdc6af9790e0fd8568394772afb9/book/implementation-roadmaps/index.md#defining-the-work).
+[roadmap format](https://github.com/anchor-book/anchor-book/blob/7a3c1019ed18ac9fa92b99d683c44228ad7b1a6f/book/implementation-roadmaps/index.md#defining-the-work).
 
 ## Current phase
 
@@ -30,11 +30,12 @@ the single authoritative setting; this chapter does not repeat its value.
 ## Tools and commands
 
 The Book uses a pinned engine revision and mdBook 0.5.4, the only version that
-engine supports. Install them once:
+engine supports. Install these versions, repeating the engine install command
+whenever its pinned revision changes:
 
 ```sh
 cargo install --git https://github.com/anchor-book/anchor-book \
-  --rev b7bcd33d0035fdc6af9790e0fd8568394772afb9 --locked anchor-book
+  --rev 7a3c1019ed18ac9fa92b99d683c44228ad7b1a6f --locked anchor-book
 cargo install mdbook --version 0.5.4 --locked
 cargo install mdbook-mermaid --version 0.17.1 --locked
 cargo install cargo-nextest --version 0.9.151 --locked
