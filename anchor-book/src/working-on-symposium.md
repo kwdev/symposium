@@ -64,10 +64,12 @@ records what they leave out. The configuration milestone remains open. A failing
 linked test still permits exit 0 while no Complete milestone claims its criterion;
 read the criterion states as well as the process status.
 
-Agent-only tests currently return `ok` when no agent runs, and this engine also
-reports them satisfied. They are not linked as evidence in this Book. The trial
-records the defect; agent execution needs a current result the runner can
-distinguish before those tests can supply evidence. Ordinary simulation tests
+Symposium owns its tests and the meaning of their outcomes. Anchor Book trusts
+the current result reported by nextest. Agent-only tests currently return `ok`
+when no agent runs; the engine reflects that passing result. They are not linked
+in this Book's configuration trial. Symposium decides whether this behavior needs
+changing before using those tests as evidence for agent behavior. No additional
+Anchor Book execution-report protocol is required. Ordinary simulation tests
 remain usable without enabling agent testing.
 
 ## Design areas not yet in this Book

@@ -98,15 +98,17 @@ reports also had identical input identities despite the different execution
 settings. The temporary criterion, requirement, link, and agent configuration were
 removed after the experiment.
 
-The engine needs a defined producer/runner contract for current execution
-evidence and its runtime inputs; ordinary libtest success cannot establish that
-an agent ran. Its Verification Evidence milestone 10 records this proposed
-correction. Milestone 8 owns required reviews of test sufficiency. Neither is
-implemented by this trial, and the configuration anchors' methods and scope are
-unchanged. Results here are Linux-only; the Unix-only directory case and the
-Windows-ignored auto-update case need separate platform evidence. The engine
-currently requests ignored tests too, so the Windows limitation must be resolved
-before relying on that link there.
+Symposium owns these tests and what their outcomes mean. Anchor Book trusts the
+current result reported by the project's runner; it does not independently
+inspect whether an agent ran. The no-agent behavior is therefore a project test
+finding, not a requirement for an engine execution-report protocol. The temporary
+agent link remains removed; this trial makes no claim about actual agent behavior.
+The code/configuration identity does not capture every runtime setting.
+
+The configuration anchors' methods and scope are unchanged. Results here are
+Linux-only; the Unix-only directory case and Windows-ignored auto-update case
+need separate platform evidence. The engine currently requests ignored tests too,
+so the Windows limitation must be resolved before relying on that link there.
 
 **Validation.** On Linux x86_64 with Rust 1.99.1,
 `cargo test --workspace --locked` reported 1,713 passed, no failures, and 15
