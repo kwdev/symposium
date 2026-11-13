@@ -14,6 +14,7 @@ impl Agent for Codex {
                 Some(erase_agent_hook_event(CodexUserPromptSubmitEvent))
             }
             super::HookEvent::SessionStart => Some(erase_agent_hook_event(CodexSessionStartEvent)),
+            super::HookEvent::Stop => Some(erase_agent_hook_event(CodexStopEvent)),
             _ => None,
         }
     }
@@ -49,6 +50,7 @@ codex_event!(
     CodexSessionStartInput,
     CodexSessionStartOutput
 );
+codex_event!(CodexStopEvent, CodexStopInput, CodexStopOutput);
 
 fn codex_hook_output_from_symposium(
     event_name: &str,
@@ -392,10 +394,15 @@ impl AgentHookInput for CodexUserPromptSubmitInput {
 
 impl AgentHookOutput for CodexUserPromptSubmitOutput {
     fn parse_output(output: &[u8]) -> anyhow::Result<Self> {
-        if output.is_empty() {
+        if output.trim_ascii().is_empty() {
             return Ok(Self::default());
         }
-        Ok(serde_json::from_slice(output)?)
+        Ok(serde_json::from_slice(output).unwrap_or_else(|_| {
+            Self::from_symposium(&symposium::OutputEvent::with_context(
+                super::HookEvent::UserPromptSubmit,
+                String::from_utf8_lossy(output).trim().to_string(),
+            ))
+        }))
     }
     fn from_symposium(event: &symposium::OutputEvent) -> Self {
         codex_hook_output_from_symposium("UserPromptSubmit", event)
@@ -408,6 +415,73 @@ impl AgentHookOutput for CodexUserPromptSubmitOutput {
                 .as_ref()
                 .and_then(|h| h.additional_context.clone()),
         ))
+    }
+    fn to_hook_output(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap()
+    }
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
+        self
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodexStopInput {
+    pub hook_event_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(flatten)]
+    pub rest: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CodexStopOutput {
+    #[serde(flatten)]
+    pub rest: serde_json::Map<String, serde_json::Value>,
+}
+
+impl AgentHookInput for CodexStopInput {
+    fn parse_input(payload: &str) -> anyhow::Result<Self> {
+        Ok(serde_json::from_str(payload)?)
+    }
+    fn to_symposium(&self) -> symposium::InputEvent {
+        symposium::InputEvent::Stop(symposium::StopInput::new(
+            self.session_id.clone(),
+            self.cwd.clone(),
+        ))
+    }
+    fn from_symposium(event: &symposium::InputEvent) -> Self {
+        let symposium::InputEvent::Stop(p) = event else {
+            panic!("wrong event")
+        };
+        Self {
+            hook_event_name: "Stop".into(),
+            session_id: p.session_id.clone(),
+            cwd: p.cwd.clone(),
+            rest: Default::default(),
+        }
+    }
+    fn to_string(&self) -> anyhow::Result<String> {
+        serde_json::to_string(self).map_err(Into::into)
+    }
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
+        self
+    }
+}
+
+impl AgentHookOutput for CodexStopOutput {
+    fn parse_output(output: &[u8]) -> anyhow::Result<Self> {
+        if output.is_empty() {
+            return Ok(Self::default());
+        }
+        Ok(serde_json::from_slice(output)?)
+    }
+    fn from_symposium(_event: &symposium::OutputEvent) -> Self {
+        Self::default()
+    }
+    fn to_symposium(&self) -> symposium::OutputEvent {
+        symposium::OutputEvent::Stop(symposium::StopOutput::default())
     }
     fn to_hook_output(&self) -> serde_json::Value {
         serde_json::to_value(self).unwrap()
@@ -474,10 +548,15 @@ impl AgentHookInput for CodexSessionStartInput {
 
 impl AgentHookOutput for CodexSessionStartOutput {
     fn parse_output(output: &[u8]) -> anyhow::Result<Self> {
-        if output.is_empty() {
+        if output.trim_ascii().is_empty() {
             return Ok(Self::default());
         }
-        Ok(serde_json::from_slice(output)?)
+        Ok(serde_json::from_slice(output).unwrap_or_else(|_| {
+            Self::from_symposium(&symposium::OutputEvent::with_context(
+                super::HookEvent::SessionStart,
+                String::from_utf8_lossy(output).trim().to_string(),
+            ))
+        }))
     }
     fn from_symposium(event: &symposium::OutputEvent) -> Self {
         codex_hook_output_from_symposium("SessionStart", event)
@@ -496,5 +575,44 @@ impl AgentHookOutput for CodexSessionStartOutput {
     }
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plain_text_on_session_start_and_prompt_is_context() {
+        let session = CodexSessionStartOutput::parse_output(b"Project rule\n").unwrap();
+        assert_eq!(
+            session.to_symposium().additional_context(),
+            Some("Project rule")
+        );
+        assert_eq!(
+            session.to_hook_output(),
+            serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "SessionStart",
+                    "additionalContext": "Project rule",
+                }
+            })
+        );
+        let prompt = CodexUserPromptSubmitOutput::parse_output(b"Project rule\n").unwrap();
+        assert_eq!(
+            prompt.to_hook_output(),
+            serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": "Project rule",
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn plain_text_on_tool_events_is_not_output() {
+        assert!(CodexPreToolUseOutput::parse_output(b"not json").is_err());
+        assert!(CodexPostToolUseOutput::parse_output(b"not json").is_err());
     }
 }

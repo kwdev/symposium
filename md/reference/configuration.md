@@ -23,6 +23,7 @@ level = "info"
 
 [defaults]
 symposium-recommendations = true
+symposium-audits = false
 user-plugins = true
 
 [[registry]]
@@ -58,7 +59,7 @@ Skills you author in `.agents/skills/` therefore flow through the same pipeline 
 Two `.symposium`-marker rules keep sources and copies distinct (symposium never writes a marker into a source, only into directories it installs):
 
 - Skill discovery skips marker-bearing directories, so copies symposium installed into `.agents/skills/` (for agents that read it natively) are never re-discovered as sources.
-- For an agent whose skill directory *is* `.agents/skills/`, a skill whose source already sits at its install slot is left in place — nothing is copied.
+- For an agent that reads `.agents/skills/` (every agent but Claude Code and Kiro), a skill whose source already sits there is left in place: nothing is copied.
 
 Installed copies receive the same marker and `*` `.gitignore` that plugin-installed skills get, which means: updates to the source are re-copied on each sync; removing the source removes the copies on the next sync (the normal stale-skill reap); disabling `agents-syncing = false` does the same; and a pre-existing user-managed directory in a target is never overwritten (the skill installs under a suffixed name instead).
 
@@ -104,11 +105,12 @@ enabled = true
 
 ## `[defaults]`
 
-Controls the two built-in registries. Both are enabled by default.
+Controls the built-in sources: two registries and the audits list. All are enabled by default except `symposium-audits`.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `symposium-recommendations` | bool | `true` | Fetch plugins from the [symposium-dev/recommendations](https://github.com/symposium-dev/recommendations) repository. |
+| `symposium-audits` | bool | `false` | Fetch the community [audits](./audits.md) list from the [symposium-dev/audits](https://github.com/symposium-dev/audits) repository: which dependency plugin payloads were audited, and which releases are revoked and never load. It is not a registry: nothing in it loads as a plugin. It is refreshed alongside the git registries, and a list that cannot be fetched only means every lookup answers "not audited"; it never holds back cleanup the way an unreachable registry does. Off until the community list exists; set it to `true` to turn it on. |
 | `user-plugins` | bool | `true` | Scan `~/.symposium/plugins/` for user-defined plugins. |
 
 ## `[[registry]]`
@@ -121,6 +123,32 @@ Defines additional registries: directories or repositories offering plugins. Eac
 | `git` | string | — | Repository URL. Fetched and cached under `~/.symposium/cache/plugin-sources/`, then read as a local directory. |
 | `path` | string | — | Local directory containing plugins. Relative paths are resolved from `~/.symposium/`. |
 | `auto-update` | bool | `true` | Check for updates on startup. Only applies to `git` registries. |
+
+## `[[package-manager]]`
+
+Adds a package manager for an ecosystem Symposium does not know natively. Each entry names a binary that speaks the [package-manager protocol](../design/module-structure.md#pmremoters--out-of-process-package-managers); Symposium spawns it on first use and talks to it over stdin/stdout.
+
+```toml
+[[package-manager]]
+name = "npm"
+command = "symposium-pm-npm"
+```
+
+The `cargo` package manager is built in and needs no entry. An entry named `cargo` **replaces** it rather than adding a second one, which is how you run the cargo package manager as a separate process:
+
+```toml
+[[package-manager]]
+name = "cargo"
+command = "symposium-pm-cargo"   # installed alongside `cargo-agents`
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `name` | string | *(required)* | The ecosystem this package manager owns. The binary must report the same name when it starts, or it is refused: package ids are routed by this name, so a mismatch would send them to the wrong place. It must be letters, digits, `_` and `-`, and no other package manager or registry may have it, for the same reason; a config that breaks either rule is not used, like one that does not parse. `cargo` is allowed, and replaces the built-in cargo package manager. |
+| `command` | string | *(required)* | The binary to run. A bare name is looked up on `PATH`. |
+| `args` | array of strings | `[]` | Extra arguments passed before the protocol takes over. |
+
+A package manager reports the plugins embedded in your dependencies, and those are **not** trusted: depending on a package does not let its author add anything to your agent. They go through the same consent as crate dependencies: see [`[plugins]`](#plugins). A package manager that fails to start, or misbehaves, contributes nothing and is logged; it never breaks a sync or a hook. While one has failed, sync leaves installed skills in place rather than removing what it did not hear about. Each package manager is given a cache directory of its own, `pm/<name>` under Symposium's cache directory, when it starts.
 
 ## `[plugins]`
 
@@ -135,8 +163,8 @@ Trust follows whoever supplies the *content*, not the package the content is abo
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `auto-enable` | array of strings | `[]` | Dependency names whose embedded plugins load without being asked about. `"*"` pre-consents to every dependency. |
-| `use` | array | `[]` | Plugins enabled deliberately. Each entry is either a plain name (enabled in every workspace) or `{ name = "...", workspace = "/path" }` (enabled only while working in that workspace root). |
-| `disable` | array of strings | `[]` | Names that must never be enabled. Takes precedence over `auto-enable`, including over `"*"`. |
+| `use` | array | `[]` | Plugins enabled deliberately. Each entry is either a plain name (enabled in every workspace, and installed for you as a plugin directory on the agents that support it) or `{ name = "...", workspace = "/path" }` (enabled only while working in that workspace root). |
+| `disable` | array of strings | `[]` | Names that must never be enabled. Takes precedence over `auto-enable`, including over `"*"`. A crate that is both disabled and [revoked](./audits.md#revocations) counts as declined. |
 
 Each name is matched by the package manager its package comes from: a crate name the way cargo matches it, hyphen/underscore-insensitively (`widget-lib` and `widget_lib` are the same entry), and a registry plugin's name exactly. A `use` name that names both a registry plugin and a crate (a dependency or one on crates.io) means the registry plugin only, so it does not also consent to that crate's embedded plugin, and a `use` name no package manager has enables nothing.
 
@@ -161,7 +189,7 @@ User-wide data lives under `~/.symposium/` by default. Override with environment
 | XDG | `$XDG_CONFIG_HOME/symposium/` | `$XDG_CACHE_HOME/symposium/` | `$XDG_STATE_HOME/symposium/logs/` |
 | Default | `~/.symposium/` | `~/.symposium/cache/` | `~/.symposium/logs/` |
 
-`SYMPOSIUM_HOME` takes precedence over XDG variables. An empty variable counts as unset, and so does a relative `XDG_*` value.
+`SYMPOSIUM_HOME` takes precedence over XDG variables. An empty variable counts as unset, and so does a relative `XDG_*` value. A relative `SYMPOSIUM_HOME` is resolved once, against the directory `cargo agents` started in.
 
 ## File locations
 
@@ -171,5 +199,6 @@ User-wide data lives under `~/.symposium/` by default. Override with environment
 | `~/.symposium/state.toml` | Persistent state (binary version stamp, last update check) |
 | `~/.symposium/telemetry/` | Telemetry event log, one JSONL file per day (created when `[telemetry] enabled = true` and events are recorded) |
 | `~/.symposium/plugins/` | User-defined plugins |
+| `~/.symposium/installed/` | Plugins enabled with `use --global`, compiled for the agents to install |
 | `~/.symposium/cache/` | Cache directory (crate sources, plugin sources) |
 | `~/.symposium/logs/` | Log files (one per invocation, timestamped) |

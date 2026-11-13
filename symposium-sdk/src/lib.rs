@@ -45,6 +45,8 @@
 //! Validating that manifest (defaults, dormancy, trust) is Symposium's job,
 //! not the PM's.
 
+pub mod audits;
+pub mod dir_walk;
 pub mod env;
 pub mod fs;
 pub mod hook;

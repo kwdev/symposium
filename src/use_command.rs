@@ -52,19 +52,24 @@ pub async fn use_plugin(
         .config
         .plugins
         .is_disabled(pms, &PackageId::any_version(&id.pm, name))
+        .await
     {
         bail!("`{name}` is disabled in `[plugins] disable`; remove that entry to enable it again");
     }
 
     // A configured registry is a trust root: what it offers is already
-    // enabled by configuration, so there is nothing to record. The exception
-    // is a dormant plugin, for which `use` is exactly the wake-up call.
-    let registry_plugin = registry
-        .plugins
-        .iter()
-        .find(|p| pms.identity(&p.canonical) == id);
+    // enabled by configuration, so there is nothing to record. The exceptions
+    // are a dormant plugin, for which `use` is exactly the wake-up call, and
+    // `--global`, which also installs the plugin for the user.
+    let mut registry_plugin = None;
+    for plugin in &registry.plugins {
+        if pms.identity(&plugin.canonical).await? == id {
+            registry_plugin = Some(plugin);
+            break;
+        }
+    }
     let dormant = registry_plugin.is_some_and(|p| p.manifest.requires_use);
-    let already_trusted = registry_plugin.is_some() && !dormant;
+    let already_trusted = registry_plugin.is_some() && !dormant && !global;
     if already_trusted {
         tracing::info!(
             report = %ReportEvent::Info {
@@ -74,6 +79,18 @@ pub async fn use_plugin(
             },
         );
         return Ok(());
+    }
+
+    // A revocation outranks `use` just as `disable` does: the entry would
+    // report success and load nothing. Checked against the release that would
+    // load, the same check every load route makes.
+    if registry_plugin.is_none() {
+        let audits = crate::audits::AuditIndex::configured(sym);
+        for plugin in pms.load_plugin(&id, UpdateLevel::Check).await {
+            if let Some(revocation) = audits.revocation(pms, &plugin.canonical).await {
+                bail!("`{name}` is {revocation}; it cannot be enabled");
+            }
+        }
     }
 
     let workspace_root = deps.root().await.map(Path::to_path_buf);
@@ -147,11 +164,14 @@ pub async fn remove_plugin(
 
     let used = std::mem::take(&mut sym.config.plugins.used);
     let before = used.len();
+    let mut removed_global = Vec::new();
     for entry in used {
         let remove = in_scope(&entry, global, workspace_root.as_deref())
             && names(pms, &registry.plugins, entry.name(), name, id.as_ref()).await;
         if !remove {
             sym.config.plugins.used.push(entry);
+        } else if let UseEntry::Global(stored) = entry {
+            removed_global.push(stored);
         }
     }
     if sym.config.plugins.used.len() == before {
@@ -159,6 +179,9 @@ pub async fn remove_plugin(
         bail!("no `use` entry for `{name}` ({scope}); see `cargo agents status`");
     }
     sym.save_config().context("failed to write user config")?;
+    for stored in &removed_global {
+        crate::state::forget_trial_use(sym.config_dir(), stored);
+    }
     tracing::info!(
         report = %ReportEvent::PluginRemoved {
             name: name.to_string(),

@@ -5,6 +5,7 @@
 //! `ReportEvent`. A custom tracing layer picks these up and either
 //! pretty-prints them (`--verbose`) or accumulates JSON (`--json`).
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
@@ -21,6 +22,17 @@ pub enum ReportMode {
     Verbose,
     /// Accumulate events, emit as a JSON array at the end.
     Json,
+}
+
+/// The outcome of `cargo agents plugin digest`: a digest, or the reason the
+/// payload has none. Exactly one, by construction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DigestOutcome {
+    /// The payload digest (`sha256:<hex>` in JSON).
+    Digest(symposium_sdk::audits::Digest),
+    /// Why there is no digest.
+    Ineligible(String),
 }
 
 /// A structured event emitted during command execution.
@@ -69,6 +81,12 @@ pub enum ReportEvent {
     /// A skill was installed to an agent's directory.
     SkillInstalled {
         skill: String,
+        agent: String,
+        dest: String,
+    },
+
+    PluginInstalled {
+        plugin: String,
         agent: String,
         dest: String,
     },
@@ -134,6 +152,8 @@ pub enum ReportEvent {
         version: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         description: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        format: Option<String>,
     },
 
     /// A `[plugins] use` entry was recorded by `cargo agents use`.
@@ -142,16 +162,43 @@ pub enum ReportEvent {
     /// A `[plugins] use` entry was dropped by `cargo agents use --remove`.
     PluginRemoved { name: String, global: bool },
 
+    /// A local plugin was linked by `cargo agents plugin try`.
+    PluginTried { name: String },
+
+    /// A trial was discarded by `cargo agents plugin try --remove`.
+    PluginTrialRemoved { name: String },
+
     /// One line of the `cargo agents status` enablement report.
     PluginStatus {
         name: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         version: Option<String>,
         /// Why the entry is in the state it is: its enablement root, or the
-        /// reason it will not load.
+        /// reason it will not load (for `revoked`, who revoked it and why).
         root: String,
-        /// `active`, `dormant`, `candidate`, or `declined`.
+        /// `active`, `dormant`, `candidate`, `declined`, or `revoked`.
         state: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        format: Option<String>,
+        /// For a dependency plugin, what the audits say about it, in the
+        /// consent prompt's words: ``audited by registry `<name>` ``,
+        /// `not audited`, or `not audited: <why>`. Never a revocation, which
+        /// is the `root` of a `revoked` line and absent from a `declined` one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        audit: Option<String>,
+    },
+
+    /// The result of `cargo agents plugin digest`.
+    PayloadDigest {
+        /// What was asked about: a directory or a crate name.
+        target: String,
+        /// The crate and version, when the target was a crate.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        krate: Option<String>,
+        /// Either the payload digest or why there is none. Flattened, so the
+        /// JSON keys are `digest` or `ineligible`.
+        #[serde(flatten)]
+        outcome: DigestOutcome,
     },
 
     /// A provider was listed with its plugins.
@@ -173,6 +220,20 @@ impl std::fmt::Display for ReportEvent {
 }
 
 impl ReportEvent {
+    /// Whether the human form goes to stderr even in normal mode: output a
+    /// script must not capture as a result. `plugin digest` prints a bare
+    /// digest on stdout so `$(cargo agents plugin digest ..)` works, so its
+    /// "no digest" explanation must not land there in the digest's place.
+    fn human_to_stderr(&self) -> bool {
+        matches!(
+            self,
+            Self::PayloadDigest {
+                outcome: DigestOutcome::Ineligible(_),
+                ..
+            }
+        )
+    }
+
     fn format_human(&self) -> String {
         match self {
             Self::PluginConsidered {
@@ -231,6 +292,11 @@ impl ReportEvent {
             Self::SkillInstalled { skill, agent, dest } => {
                 format!("✅ installed skill {skill} for {agent} → {dest}")
             }
+            Self::PluginInstalled {
+                plugin,
+                agent,
+                dest,
+            } => format!("installed plugin {plugin} for {agent} -> {dest}"),
             Self::SkillRemoved { path } => {
                 format!("➖ removed {path}")
             }
@@ -303,10 +369,14 @@ impl ReportEvent {
                 name,
                 version,
                 description,
+                format,
             } => {
                 let mut line = format!("  {name}");
                 if let Some(v) = version {
                     line.push_str(&format!(" {v}"));
+                }
+                if let Some(f) = format {
+                    line.push_str(&format!(" ({f})"));
                 }
                 if let Some(d) = description {
                     line.push_str(&format!("\n      {d}"));
@@ -329,23 +399,51 @@ impl ReportEvent {
                 };
                 format!("➖ removed the {name} enablement for {scope}")
             }
+            Self::PluginTried { name } => {
+                format!(
+                    "trying {name} in every workspace; edits reach your agents on the next sync"
+                )
+            }
+            Self::PluginTrialRemoved { name } => format!("stopped trying {name}"),
+            // A bare digest on success, so `$(cargo agents plugin digest ..)`
+            // is usable in scripts. The failure goes to stderr
+            // (`human_to_stderr`).
+            Self::PayloadDigest {
+                target, outcome, ..
+            } => match outcome {
+                DigestOutcome::Digest(digest) => digest.to_string(),
+                DigestOutcome::Ineligible(why) => {
+                    format!("no payload digest for {target}: {why}")
+                }
+            },
             Self::PluginStatus {
                 name,
                 version,
                 root,
                 state,
+                format,
+                audit,
             } => {
                 let marker = match state.as_str() {
                     "active" => "✅",
                     "dormant" => "💤",
                     "candidate" => "❓",
+                    "revoked" => "⛔",
                     _ => "➖",
                 };
                 let version = version
                     .as_deref()
                     .map(|v| format!(" {v}"))
                     .unwrap_or_default();
-                format!("{marker} {name}{version} — {root}")
+                let version = match format {
+                    Some(label) => format!("{version} ({label})"),
+                    None => version,
+                };
+                let audit = audit
+                    .as_deref()
+                    .map(|audit| format!(" — {audit}"))
+                    .unwrap_or_default();
+                format!("{marker} {name}{version} — {root}{audit}")
             }
 
             Self::ProviderListed {
@@ -389,6 +487,7 @@ pub struct ReportLayer {
     mode: ReportMode,
     buffer: Arc<Mutex<Vec<serde_json::Value>>>,
     max_level: tracing::Level,
+    warned: Mutex<HashSet<String>>,
 }
 
 impl ReportLayer {
@@ -402,6 +501,7 @@ impl ReportLayer {
                 mode,
                 buffer,
                 max_level,
+                warned: Mutex::default(),
             },
             handle,
         )
@@ -441,11 +541,22 @@ where
         let Some(json_str) = visitor.report_json else {
             return;
         };
+        if matches!(
+            serde_json::from_str(&json_str),
+            Ok(ReportEvent::Warning { .. })
+        ) && !self.warned.lock().unwrap().insert(json_str.clone())
+        {
+            return;
+        }
 
         match self.mode {
             ReportMode::Normal => {
                 if let Ok(evt) = serde_json::from_str::<ReportEvent>(&json_str) {
-                    println!("{}", evt.format_human());
+                    if evt.human_to_stderr() {
+                        eprintln!("{}", evt.format_human());
+                    } else {
+                        println!("{}", evt.format_human());
+                    }
                 }
             }
             ReportMode::Verbose => {
@@ -459,5 +570,49 @@ where
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only a digest goes to stdout from `plugin digest`; the reason there is
+    /// none goes to stderr, so a script capturing stdout gets nothing.
+    #[test]
+    fn only_the_digest_itself_goes_to_stdout() {
+        let event = |outcome| ReportEvent::PayloadDigest {
+            target: "x".into(),
+            krate: None,
+            outcome,
+        };
+        let digest = symposium_sdk::audits::Digest::from_bytes([0; 32]);
+        assert!(!event(DigestOutcome::Digest(digest)).human_to_stderr());
+        assert!(event(DigestOutcome::Ineligible("why".into())).human_to_stderr());
+    }
+
+    /// A status line ends with the audit answer, in the consent prompt's
+    /// words, and has no audit part when none was looked up.
+    #[test]
+    fn a_status_line_ends_with_the_audit_answer() {
+        let line = |audit: Option<&str>| {
+            ReportEvent::PluginStatus {
+                name: "widget-lib".into(),
+                version: Some("0.3.1".into()),
+                root: "found via dependency `widget-lib`, awaiting consent (`cargo agents use widget-lib`)".into(),
+                state: "candidate".into(),
+                format: None,
+                audit: audit.map(str::to_string),
+            }
+            .format_human()
+        };
+        assert_eq!(
+            line(Some("not audited")),
+            "❓ widget-lib 0.3.1 — found via dependency `widget-lib`, awaiting consent (`cargo agents use widget-lib`) — not audited"
+        );
+        assert_eq!(
+            line(None),
+            "❓ widget-lib 0.3.1 — found via dependency `widget-lib`, awaiting consent (`cargo agents use widget-lib`)"
+        );
     }
 }

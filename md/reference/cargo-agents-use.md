@@ -14,7 +14,7 @@ cargo agents use <NAME> --remove [--global]
 | Flag | Description |
 |------|-------------|
 | `<NAME>` | Plugin or crate name to enable |
-| `--global` | Enable for every workspace instead of just the current one |
+| `--global` | Enable for every workspace instead of just the current one, and install it for you rather than per project |
 | `--remove` | Drop a previously recorded enablement instead of adding one |
 
 ## Behavior
@@ -31,7 +31,9 @@ use = [
 ```
 
 Then it runs a sync, so the plugin's skills install right away rather than
-waiting for the next one.
+waiting for the next one. A `--global` entry installs the plugin once for you
+on the agents that support it, and per project on the others; see
+[`cargo agents sync`](./cargo-agents-sync.md#plugins-enabled-for-every-workspace).
 
 Two things a `use` entry can enable:
 
@@ -44,8 +46,9 @@ Two things a `use` entry can enable:
   what wakes it.
 
 Anything a configured registry already offers under a `depends-on` gate is
-enabled by configuration — pointing config at a registry is the act of
-trusting its curation — so `use`-ing it is a no-op and reports as such.
+enabled by configuration, since pointing config at a registry is the act of
+trusting its curation. `use`-ing it is a no-op and reports as such, unless
+`--global` asks to install it for you: then the entry is recorded.
 
 Enablement is not activation: `use` only adds to what *may* run. The plugin's
 own [predicates](./predicates.md) still decide when it applies.
@@ -56,6 +59,13 @@ cargo matches crate names, so `widget-lib` and `widget_lib` are the same).
 When a registry plugin and a crate share the name, the registry plugin wins.
 Otherwise the command fails with `no package named <NAME>` and writes nothing.
 Use [`cargo agents search`](./cargo-agents-search.md) to find the right name.
+
+A crate the [audits list](./audits.md#revocations) revokes cannot be enabled:
+`use` fails with the revocation and its reason (for example ``revoked by the
+`symposium-audits` list: it tells the agent to fetch and run remote code``) and
+writes nothing, since a revocation outranks every `use` entry. The check is
+made against the release that would load. A name in `[plugins] disable` is
+refused the same way.
 
 ### `--remove`
 

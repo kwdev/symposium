@@ -83,7 +83,7 @@ async fn symposium_hook_fires_when_no_native_match() {
 /// When running on Claude and the plugin only has `format = "claude"` (no
 /// symposium fallback), the hook fires.
 #[tokio::test(flavor = "multi_thread")]
-async fn claude_only_hook_fires_on_claude() {
+async fn claude_only_hook_fires_on_claude_with_its_plugin_root() {
     with_fixture(
         TestMode::SimulationOnly,
         &["plugin-hooks-format"],
@@ -100,8 +100,13 @@ async fn claude_only_hook_fires_on_claude() {
                 .await?;
 
             assert!(
-                result.has_context_containing("claude-only-fired"),
+                result.has_context_containing("claude-only-fired from "),
                 "expected claude-only hook to fire on Claude, got: {:#?}",
+                result.outputs_for(HookEvent::PreToolUse),
+            );
+            assert!(
+                result.has_context_containing("/plugins/claude-only-plugin"),
+                "expected CLAUDE_PLUGIN_ROOT to name the plugin directory, got: {:#?}",
                 result.outputs_for(HookEvent::PreToolUse),
             );
             Ok(())
@@ -135,6 +140,71 @@ async fn claude_only_hook_does_not_fire_on_other_agents() {
                 "claude-only hook should NOT fire on Copilot, got: {:#?}",
                 result.outputs_for(HookEvent::PreToolUse),
             );
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn agent_restricted_hook_fires_only_on_its_agent() {
+    with_fixture(
+        TestMode::SimulationOnly,
+        &["plugin-hooks-format"],
+        async |mut ctx| {
+            let grep = [HookStep::PreToolUse {
+                tool_name: "Grep".to_string(),
+                tool_input: json!({"pattern": "x"}),
+            }];
+
+            let claude = ctx
+                .prompt_or_hook("ignored", &grep, HookAgent::Claude)
+                .await?;
+            assert!(
+                claude.has_context_containing("agent-restricted-fired"),
+                "expected the agent = \"claude\" hook to fire on Claude, got: {:#?}",
+                claude.outputs_for(HookEvent::PreToolUse),
+            );
+
+            let copilot = ctx
+                .prompt_or_hook("ignored", &grep, HookAgent::Copilot)
+                .await?;
+            assert!(
+                !copilot.has_context_containing("agent-restricted-fired"),
+                "the agent = \"claude\" hook should NOT fire on Copilot, got: {:#?}",
+                copilot.outputs_for(HookEvent::PreToolUse),
+            );
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn symposium_hook_fires_when_native_hook_predicates_fail() {
+    with_fixture(
+        TestMode::SimulationOnly,
+        &["plugin-hooks-format"],
+        async |mut ctx| {
+            let result = ctx
+                .prompt_or_hook(
+                    "ignored",
+                    &[HookStep::PreToolUse {
+                        tool_name: "Glob".to_string(),
+                        tool_input: json!({"pattern": "*.rs"}),
+                    }],
+                    HookAgent::Claude,
+                )
+                .await?;
+
+            assert!(
+                result.has_context_containing("portable-fallback-fired"),
+                "expected the symposium hook to fire when the native hook's predicates fail, got: {:#?}",
+                result.outputs_for(HookEvent::PreToolUse),
+            );
+            assert!(!result.has_context_containing("gated-native-fired"));
             Ok(())
         },
     )

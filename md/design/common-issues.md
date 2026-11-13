@@ -27,12 +27,18 @@ knowing before debugging a hook that "does nothing".
 ### `{}` on `PreToolUse` denies the tool call
 
 Antigravity ignores hook exit codes entirely; only stdout decides. On
-`PreToolUse`, an object without a valid `decision` — `{}` included, as well as
-`{"decision": ""}` — is treated as a **denial**, while writing nothing at all
-allows. Symposium's dispatcher would otherwise return `{}` whenever no plugin contributed, which
-is the common case, so `AntigravityPreToolUseOutput` keeps `decision` as a plain
-always-serialized field defaulting to `allow`. Making it `Option` or adding
-`skip_serializing_if` would block every tool call.
+`PreToolUse`, an object without a valid `decision` (`{}` included, as well as
+`{"decision": ""}`) is treated as a **denial**, while writing nothing at all
+allows. A plugin hook in Antigravity's own format that answers with no
+`decision` (or an empty one) is read as the denial it is, so dispatch stops
+there.
+
+Symposium's own answer leaves `decision` unset unless something decided, so a
+hook that only adds context cannot overwrite another hook's `"ask"`. That makes
+`{}` the common final answer (no plugin contributed, or one only added context),
+so `AntigravityPreToolUseEvent::respond`, which every response goes through, adds
+`"decision": "allow"` to a final object that has none. Dropping that step would
+block every tool call.
 
 ### Unknown event names and shapes are accepted and never fire
 
@@ -60,6 +66,35 @@ Plugin content must not decide where Symposium writes. A name it supplies, such 
 
 Whether two names are the same package is the package manager's rule, not a string comparison: cargo treats `widget-lib` and `widget_lib` as one crate, while a registry compares its plugin names exactly. So code that matches a name typed by the user against a plugin or a dependency resolves both through `PmRegistry::identify` or `PmRegistry::identity` and compares the results, rather than comparing strings or applying one ecosystem's normalization to every name. Nor is a name a crate by default: `identify` asks the package managers whether they have it and fails with `no package named ...` when none does. A `[plugins]` entry names no package manager, so the `PluginsConfig` queries take the `PackageId` being checked and compare the entry under that id's package manager: `disable = ["my_plugin"]` covers the crate `my-plugin` but not a registry plugin named `my-plugin`. A `"*"` entry is a pattern, not a name: the `PluginsConfig` queries treat it as matching everything, so code that lists entries skips it rather than reporting it as a plugin.
 
+## Remote package managers need identity and lifecycle boundaries
+
+A remote PM's naming rules do not come from its configured name. Every PM
+implements `canonical_names` to answer batches of names;
+lookup and config comparisons await that operation for both returned package
+names and user entries. Failed normalization marks the PM failed and cannot
+bypass `disable` or authorize cleanup. Consent decisions retain the discovered
+package's PM identity, and recording them uses that PM's naming rules for both
+approvals and declines. Activation includes enabled dependencies from every
+ecosystem. Consent recording propagates normalization errors instead of
+reporting an unwritten decision as saved.
+
+A remote PM can die after successfully describing the project and dependencies.
+Transport failures carry an `Unavailable` error marker so `PmInstance` also
+records failures during package lookup and `load_plugin`. Those failures must
+suppress stale-skill and MCP cleanup. A valid error response about one package
+leaves the PM usable and does not block cleanup for its whole ecosystem.
+
+Killing only the PM leaves its workers running. `RemotePm` owns a process group
+on Unix or a job object on Windows, guarded from spawn through initialization,
+requests, and connection drop. Cancellation marks the connection unusable
+before initialization starts and terminates the tree before scheduling reaping.
+
+Remote requests ordinarily have a thirty-second timeout, longer than Codex and
+Copilot's ten-second hook deadline. Hook dispatch gives all remote PMs one
+shared two-second deadline, including initialization and subsequent operations.
+Expiry fails PM work and leaves time for healthy local plugins to return their
+decisions; timing out the whole hook would discard those decisions too.
+
 ## A source that reads as empty is not an empty source
 
 A listing that swallows read errors returns the same empty list for "nothing there" and "could not look", and anything that removes what a source stopped offering turns the second into data loss: a `[[registry]]` path on an unmounted share would make `sync` delete every skill installed from it. So `PackageManager::registry_plugins` fails when a registry cannot be read and otherwise says whether every entry loaded, `PluginRegistry::unreadable_registries` carries a registry that failed either way to `sync`, and `sync` skips its stale-skill and project MCP cleanup while that list is not empty. An entry whose manifest fails to parse is the same case on a smaller scale: the plugin did not withdraw what it installed. Any new pass that removes things because a source stopped offering them belongs behind the same condition. The user config is such a source for the agent list: one that cannot be read loads with no agents, so `sync` refuses to run on it rather than reaping every agent's skills and hooks. The opposite mistake is as bad: a source that is legitimately absent must not count as unreadable, or cleanup never runs again, which is why the built-in `~/.symposium/plugins/` is left out when nothing exists at that path.
@@ -71,6 +106,14 @@ Where one rule guards several passes, bind it once and have every guard read tha
 ## An input that does not exist yet is still an input
 
 A cache keyed on "have my inputs changed?" has to name the files whose *appearance* changes the answer, not just the ones it read. `ProjectInfo::inputs` is the files a package manager's answers depend on, and the mtime of a file that does not exist records as `None`, so a path reported while absent and later found present reads as a change. That is what lets a hook notice a workspace it could not have read before: a `Cargo.toml` appearing between the session's starting directory and the cached root re-roots the workspace, and no lockfile under the old root would ever show it. A package manager that reports only the files it actually opened will pin a stale root for the rest of the session. The matching rule on the consumer side is already in `WorkspaceState::fresh`: a workspace that names no inputs is never fresh, since nothing would tell that its answers had changed.
+
+## Agent Plugins manifests are closed but forgiving
+
+`plugin.json` has a closed schema, yet the format requires an unknown top-level field, or an `extensions` that is not an object, to be reported and ignored while the package still loads. `#[serde(deny_unknown_fields)]` would reject the package instead, and a plain `Option<String>` would accept the `null` the schema forbids, which is why `plugins/agent_plugin.rs` checks the manifest by hand over a `serde_json::Value`. Its `dev.symposium` namespace is the opposite case and stays strict, because ignoring a typo there would make a package apply more widely than its author meant.
+
+## Installed copies are never sources
+
+A directory Symposium installed carries a `.symposium` marker file, and the trees it installs into can also be read as sources (`.agents/skills/` is a workspace skill group, and a registry can point at a tree holding copies). Any walk that discovers sources skips marked directories, as `find_skill_files_recursive` and the registry layout walk do, or a sync reads its own output back. The layout walk checks that the marker is a file, because a project root can hold a `.symposium/` directory that is not a marker.
 
 ## Windows portability (tests)
 

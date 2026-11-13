@@ -110,10 +110,10 @@ pub async fn dispatch_external(
 
     let dep_ids = ws.dep_ids().await.to_vec();
     let pms = ws.pms();
-    let used = workspace
-        .as_ref()
-        .map(|ws| crate::discovery::used_plugins(sym, pms, &registry.plugins, &ws.root))
-        .unwrap_or_default();
+    let used = match &workspace {
+        Some(ws) => crate::discovery::used_plugins(sym, pms, &registry.plugins, &ws.root).await,
+        None => Vec::new(),
+    };
 
     // Resolve the active plugin set so crate-sourced subcommands are dispatchable.
     let mut ctx = crate::predicate::PredicateContext::new(&dep_ids).with_used(&used);
@@ -140,7 +140,7 @@ pub async fn dispatch_external(
         })?;
 
     let runnable = resolve_runnable(
-        acquire_installation(sym, installation, None, None, UpdateLevel::None).await?,
+        acquire_installation(sym, installation, None, None, UpdateLevel::None, None).await?,
         &format!("subcommand `{name}`"),
     )?;
 
@@ -208,6 +208,8 @@ mod tests {
             canonical: PackageId::new("test", name, ANY_VERSION),
             manifest: PluginManifest {
                 name: name.into(),
+                version: None,
+                description: None,
                 predicates: crate_set(depends_on),
                 installations: vec![],
                 hooks: vec![],
@@ -219,6 +221,8 @@ mod tests {
                 requires_use: false,
             },
             workspace_member: false,
+            agent_plugin_root: None,
+            root: std::path::PathBuf::new(),
         }
     }
 

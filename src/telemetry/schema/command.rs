@@ -34,6 +34,10 @@ pub(in crate::telemetry) enum BuiltinCommand {
     PluginList,
     PluginShow,
     PluginValidate,
+    PluginImport,
+    PluginTry,
+    PluginTryRemove,
+    PluginDigest,
     SelfUpdate,
     CrateInfo,
 }
@@ -66,6 +70,10 @@ impl BuiltinCommand {
             PluginCommand::List => Self::PluginList,
             PluginCommand::Show { .. } => Self::PluginShow,
             PluginCommand::Validate { .. } => Self::PluginValidate,
+            PluginCommand::Import { .. } => Self::PluginImport,
+            PluginCommand::Try { remove: false, .. } => Self::PluginTry,
+            PluginCommand::Try { remove: true, .. } => Self::PluginTryRemove,
+            PluginCommand::Digest { .. } => Self::PluginDigest,
         }
     }
 
@@ -83,6 +91,10 @@ impl BuiltinCommand {
             Self::PluginList => "plugin_list",
             Self::PluginShow => "plugin_show",
             Self::PluginValidate => "plugin_validate",
+            Self::PluginImport => "plugin_import",
+            Self::PluginTry => "plugin_try",
+            Self::PluginTryRemove => "plugin_try_remove",
+            Self::PluginDigest => "plugin_digest",
             Self::SelfUpdate => "self_update",
             Self::CrateInfo => "crate_info",
         }
@@ -359,6 +371,14 @@ mod tests {
                 &["plugin", "validate", "."],
                 Some(BuiltinCommand::PluginValidate),
             ),
+            (
+                &["plugin", "import", "."],
+                Some(BuiltinCommand::PluginImport),
+            ),
+            (
+                &["plugin", "digest", "."],
+                Some(BuiltinCommand::PluginDigest),
+            ),
             (&["self-update"], Some(BuiltinCommand::SelfUpdate)),
             (&["crate-info", "serde"], Some(BuiltinCommand::CrateInfo)),
             (&["hook", "claude", "session-start"], None),
@@ -386,6 +406,10 @@ mod tests {
             (BuiltinCommand::PluginList, "plugin_list"),
             (BuiltinCommand::PluginShow, "plugin_show"),
             (BuiltinCommand::PluginValidate, "plugin_validate"),
+            (BuiltinCommand::PluginImport, "plugin_import"),
+            (BuiltinCommand::PluginTry, "plugin_try"),
+            (BuiltinCommand::PluginTryRemove, "plugin_try_remove"),
+            (BuiltinCommand::PluginDigest, "plugin_digest"),
             (BuiltinCommand::SelfUpdate, "self_update"),
             (BuiltinCommand::CrateInfo, "crate_info"),
         ];

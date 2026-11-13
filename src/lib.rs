@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod audits;
 pub mod cli;
 pub mod config;
 pub mod crate_command;
@@ -9,6 +10,7 @@ pub mod hook;
 pub mod hook_schema;
 pub(crate) mod installation;
 pub mod output;
+pub mod plugin_import;
 pub mod plugins;
 pub mod pm;
 pub mod report;
@@ -18,15 +20,15 @@ pub mod state;
 pub mod status_command;
 pub mod subcommand_dispatch;
 pub mod telemetry;
+pub mod try_command;
 pub mod use_command;
 pub mod workspace_state;
 
-pub(crate) mod crate_metadata;
-pub(crate) mod dir_walk;
+pub(crate) mod compile;
+pub(crate) use symposium_sdk::dir_walk;
 pub(crate) mod init;
 pub mod sync;
 
-pub(crate) mod crate_sources;
 pub(crate) mod predicate;
 pub(crate) mod predicate_cache;
 pub(crate) mod skills;

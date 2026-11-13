@@ -5,6 +5,11 @@
 //! that knowledge.
 
 mod mcp_server_registration;
+mod plugin_registration;
+
+pub(crate) use plugin_registration::sync_marketplace_index;
+
+pub(crate) use mcp_server_registration::server_name as mcp_server_name;
 
 use std::fs;
 use std::io::Write as _;
@@ -15,6 +20,19 @@ use serde_json::json;
 
 use crate::config::Symposium;
 use crate::output::{Output, display_path};
+
+#[derive(Debug, PartialEq)]
+pub(crate) struct CompiledPlugin {
+    pub name: String,
+    pub dir: PathBuf,
+    pub updated: bool,
+}
+
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct Delivery {
+    pub delivered: Vec<String>,
+    pub updated: Vec<String>,
+}
 
 /// Which of an agent's two MCP configuration levels to write.
 ///
@@ -71,6 +89,13 @@ impl Agent {
         }
     }
 
+    pub(crate) fn is_configured(&self, sym: &Symposium) -> bool {
+        sym.config
+            .agents
+            .iter()
+            .any(|entry| entry.name == self.config_name())
+    }
+
     /// Human-readable display name.
     pub fn display_name(&self) -> &'static str {
         match self {
@@ -97,6 +122,28 @@ impl Agent {
         ]
     }
 
+    pub fn detect_installed(sym: &Symposium) -> Vec<Agent> {
+        Agent::all()
+            .iter()
+            .copied()
+            .filter(|agent| agent.user_config_dir(sym).is_dir())
+            .collect()
+    }
+
+    fn user_config_dir(&self, sym: &Symposium) -> PathBuf {
+        let home = sym.home_dir();
+        match self {
+            // Not `~/.gemini/` alone: Gemini CLI creates that one too.
+            Agent::Antigravity => home.join(".gemini").join("antigravity-cli"),
+            Agent::Claude => claude_config_dir(sym),
+            Agent::Codex => codex_dir(sym),
+            Agent::Copilot => copilot_config_dir(sym),
+            Agent::Goose => goose_config_dir(sym),
+            Agent::Kiro => home.join(".kiro"),
+            Agent::OpenCode => xdg_config_dir(sym).join("opencode"),
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Skill installation paths
     // -----------------------------------------------------------------------
@@ -118,7 +165,10 @@ impl Agent {
             }
             Agent::Goose => project_root.join(".agents").join("skills").join(skill_name),
             Agent::Kiro => project_root.join(".kiro").join("skills").join(skill_name),
-            Agent::OpenCode => project_root.join(".agents").join("skills").join(skill_name),
+            Agent::OpenCode => project_root
+                .join(".opencode")
+                .join("skills")
+                .join(skill_name),
         }
     }
 
@@ -143,6 +193,15 @@ impl Agent {
             Agent::Goose => Some(home.join(".agents").join("skills").join(skill_name)),
             Agent::Kiro => Some(home.join(".kiro").join("skills").join(skill_name)),
             Agent::OpenCode => Some(home.join(".agents").join("skills").join(skill_name)),
+        }
+    }
+
+    pub(crate) fn reads_vendor_neutral_skills(&self) -> bool {
+        match self {
+            Agent::Antigravity | Agent::Codex | Agent::Copilot | Agent::Goose | Agent::OpenCode => {
+                true
+            }
+            Agent::Claude | Agent::Kiro => false,
         }
     }
 
@@ -234,10 +293,6 @@ impl Agent {
         sym: &Symposium,
     ) -> PathBuf {
         let home = sym.home_dir();
-        let xdg_config = || {
-            sym.env_dir("XDG_CONFIG_HOME")
-                .unwrap_or_else(|| home.join(".config"))
-        };
 
         match (self, scope) {
             // Project MCP is `.mcp.json`; the user-level file is `.claude.json`.
@@ -259,7 +314,7 @@ impl Agent {
 
             (Agent::OpenCode, McpScope::Project) => project_root.join("opencode.json"),
             (Agent::OpenCode, McpScope::User) => {
-                xdg_config().join("opencode").join("opencode.json")
+                xdg_config_dir(sym).join("opencode").join("opencode.json")
             }
 
             (Agent::Kiro, McpScope::Project) => {
@@ -274,10 +329,7 @@ impl Agent {
             // to a file nobody reads.
             (Agent::Codex, _) => codex_dir(sym).join("config.toml"),
             (Agent::Copilot, _) => copilot_config_dir(sym).join("mcp-config.json"),
-            (Agent::Goose, _) => goose_path_root(sym)
-                .map(|root| root.join("config"))
-                .unwrap_or_else(|| xdg_config().join("goose"))
-                .join("config.yaml"),
+            (Agent::Goose, _) => goose_config_dir(sym).join("config.yaml"),
         }
     }
 
@@ -346,6 +398,57 @@ impl Agent {
                 mcp_server_registration::unregister_opencode_mcp_servers(path, names, out)
             }
         }
+    }
+
+    pub(crate) fn deliver_user_plugins(
+        &self,
+        sym: &Symposium,
+        plugins: &[CompiledPlugin],
+    ) -> Option<Delivery> {
+        let plugins_dir = match self {
+            Agent::Antigravity => sym
+                .home_dir()
+                .join(".gemini")
+                .join("config")
+                .join("plugins"),
+            Agent::Claude => claude_config_dir(sym).join("skills"),
+            Agent::Codex => return plugin_registration::codex::deliver_user_plugins(sym, plugins),
+            Agent::Copilot => {
+                return plugin_registration::copilot::deliver_user_plugins(sym, plugins);
+            }
+            Agent::Goose => goose_path_root(sym)
+                .unwrap_or_else(|| sym.home_dir().to_path_buf())
+                .join(".agents")
+                .join("plugins"),
+            Agent::Kiro | Agent::OpenCode => return None,
+        };
+        Some(plugin_registration::deliver_copies(
+            sym,
+            *self,
+            &plugins_dir,
+            plugins,
+        ))
+    }
+
+    pub(crate) fn deliver_project_plugins(
+        &self,
+        sym: &Symposium,
+        project_root: &Path,
+        plugins: &[CompiledPlugin],
+    ) -> Option<Delivery> {
+        let Agent::Claude = self else {
+            return None;
+        };
+        let skills_dir = project_root.join(".claude").join("skills");
+        let delivery = plugin_registration::deliver_copies(sym, *self, &skills_dir, plugins);
+        for name in &delivery.delivered {
+            if let Err(e) = crate::sync::ignore_in_git(&skills_dir.join(name)) {
+                tracing::info!(
+                    report = %crate::report::ReportEvent::Warning { message: format!("{e:#}") },
+                );
+            }
+        }
+        Some(delivery)
     }
 
     /// Remove hooks from the project-level agent config.
@@ -479,6 +582,7 @@ fn register_codex_hooks(hooks_path: &Path, out: &Output) -> Result<()> {
         "PostToolUse",
         "UserPromptSubmit",
         "SessionStart",
+        "Stop",
     ] {
         let command = format!("cargo-agents hook codex {}", event_to_cli_arg(event));
         if ensure_codex_hook_entry(event_hooks(hooks_obj, event, &display)?, &command) {
@@ -690,11 +794,18 @@ fn register_antigravity_hooks(hooks_path: &Path, out: &Output) -> Result<()> {
         };
         entry.insert((*event).to_string(), value);
     }
-    let entry = serde_json::Value::Object(entry);
+    let mut entry = serde_json::Value::Object(entry);
 
     let obj = config
         .as_object_mut()
         .with_context(|| format!("{display} is not a JSON object"))?;
+    if obj
+        .get(ANTIGRAVITY_HOOK_NAME)
+        .and_then(|existing| existing.get("enabled"))
+        == Some(&json!(false))
+    {
+        entry["enabled"] = json!(false);
+    }
     if obj.get(ANTIGRAVITY_HOOK_NAME) == Some(&entry) {
         out.already_ok(format!("{display}: hooks already registered"));
         return Ok(());
@@ -966,6 +1077,17 @@ fn goose_path_root(sym: &Symposium) -> Option<PathBuf> {
     sym.env_dir("GOOSE_PATH_ROOT")
 }
 
+fn xdg_config_dir(sym: &Symposium) -> PathBuf {
+    sym.env_dir("XDG_CONFIG_HOME")
+        .unwrap_or_else(|| sym.home_dir().join(".config"))
+}
+
+fn goose_config_dir(sym: &Symposium) -> PathBuf {
+    goose_path_root(sym)
+        .map(|root| root.join("config"))
+        .unwrap_or_else(|| xdg_config_dir(sym).join("goose"))
+}
+
 fn event_to_cli_arg(event: &str) -> &str {
     match event {
         "PreToolUse" | "preToolUse" => "pre-tool-use",
@@ -1098,6 +1220,110 @@ mod tests {
         assert_eq!(Agent::from_config_name("codex").unwrap(), Agent::Codex);
         assert_eq!(Agent::from_config_name("copilot").unwrap(), Agent::Copilot);
         assert!(Agent::from_config_name("unknown").is_err());
+    }
+
+    fn detect(home: &Path, vars: &[(&str, &Path)]) -> Vec<Agent> {
+        let vars: Vec<(String, std::ffi::OsString)> = vars
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.as_os_str().to_owned()))
+            .collect();
+        let mut sym = Symposium::from_dir(home);
+        sym.set_env(move |name| {
+            vars.iter()
+                .find(|(var, _)| var == name)
+                .map(|(_, value)| value.clone())
+        });
+        Agent::detect_installed(&sym)
+    }
+
+    #[test]
+    fn detects_nothing_on_a_bare_machine() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(detect(home.path(), &[]).is_empty());
+    }
+
+    #[test]
+    fn detects_agent_by_config_dir() {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir(home.path().join(".codex")).unwrap();
+        assert_eq!(detect(home.path(), &[]), vec![Agent::Codex]);
+    }
+
+    #[test]
+    fn a_file_is_not_a_config_dir() {
+        let home = tempfile::tempdir().unwrap();
+        fs::write(home.path().join(".codex"), "").unwrap();
+        assert!(detect(home.path(), &[]).is_empty());
+    }
+
+    #[test]
+    fn empty_relocation_falls_back_to_home() {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir(home.path().join(".claude")).unwrap();
+        assert_eq!(
+            detect(home.path(), &[("CLAUDE_CONFIG_DIR", Path::new(""))]),
+            vec![Agent::Claude]
+        );
+    }
+
+    #[test]
+    fn gemini_dir_alone_is_not_antigravity() {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir(home.path().join(".gemini")).unwrap();
+        assert!(detect(home.path(), &[]).is_empty());
+
+        fs::create_dir(home.path().join(".gemini").join("antigravity-cli")).unwrap();
+        assert_eq!(detect(home.path(), &[]), vec![Agent::Antigravity]);
+    }
+
+    #[test]
+    fn detection_honors_relocated_config_dirs() {
+        let home = tempfile::tempdir().unwrap();
+        let moved = tempfile::tempdir().unwrap();
+        let dir = |name: &str| moved.path().join(name);
+        for name in ["claude", "codex", "copilot", "goose/config", "xdg/opencode"] {
+            fs::create_dir_all(dir(name)).unwrap();
+        }
+        assert_eq!(
+            detect(
+                home.path(),
+                &[
+                    ("CLAUDE_CONFIG_DIR", &dir("claude")),
+                    ("CODEX_HOME", &dir("codex")),
+                    ("COPILOT_HOME", &dir("copilot")),
+                    ("GOOSE_PATH_ROOT", &dir("goose")),
+                    ("XDG_CONFIG_HOME", &dir("xdg")),
+                ]
+            ),
+            vec![
+                Agent::Claude,
+                Agent::Codex,
+                Agent::Copilot,
+                Agent::Goose,
+                Agent::OpenCode
+            ]
+        );
+    }
+
+    #[test]
+    fn a_relocated_agent_is_not_detected_in_its_default_dir() {
+        let home = tempfile::tempdir().unwrap();
+        let moved = tempfile::tempdir().unwrap();
+        for name in [".claude", ".codex", ".copilot", ".config/goose"] {
+            fs::create_dir_all(home.path().join(name)).unwrap();
+        }
+        assert!(
+            detect(
+                home.path(),
+                &[
+                    ("CLAUDE_CONFIG_DIR", &moved.path().join("claude")),
+                    ("CODEX_HOME", &moved.path().join("codex")),
+                    ("COPILOT_HOME", &moved.path().join("copilot")),
+                    ("GOOSE_PATH_ROOT", moved.path()),
+                ]
+            )
+            .is_empty()
+        );
     }
 
     /// Each path was confirmed by asking the tool itself, not read off docs: a
@@ -1432,6 +1658,10 @@ mod tests {
         assert!(hooks.get("PostToolUse").is_some());
         assert!(hooks.get("UserPromptSubmit").is_some());
         assert!(hooks.get("SessionStart").is_some());
+        assert_eq!(
+            hooks["Stop"][0]["hooks"][0]["command"],
+            "cargo-agents hook codex stop"
+        );
 
         // Verify the structure uses empty matcher
         let pre_tool = hooks["PreToolUse"].as_array().unwrap();
@@ -1652,11 +1882,11 @@ mod tests {
     }
 
     #[test]
-    fn opencode_project_skill_dir_uses_vendor_neutral() {
+    fn opencode_project_skill_dir() {
         let root = Path::new("/project");
         assert_eq!(
             Agent::OpenCode.project_skill_dir(root, "tokio"),
-            PathBuf::from("/project/.agents/skills/tokio")
+            PathBuf::from("/project/.opencode/skills/tokio")
         );
     }
 
@@ -1732,6 +1962,37 @@ mod tests {
 
         // Timeout is in seconds for this agent, not milliseconds.
         assert_eq!(pre_invocation["timeout"], 30);
+    }
+
+    #[test]
+    fn antigravity_user_disabled_hook_stays_disabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("hooks.json");
+        register_antigravity_hooks(&path, &Output::quiet()).unwrap();
+        let mut cfg: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        cfg["symposium"]["enabled"] = json!(false);
+        cfg["symposium"]["Stop"][0]["command"] = json!("/old");
+        fs::write(&path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+
+        register_antigravity_hooks(&path, &Output::quiet()).unwrap();
+        let cfg: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(cfg["symposium"]["enabled"], false, "got: {cfg:#}");
+        assert_eq!(
+            cfg["symposium"]["Stop"][0]["command"],
+            "cargo-agents hook antigravity stop"
+        );
+
+        let out = Output::capturing();
+        register_antigravity_hooks(&path, &out).unwrap();
+        assert!(
+            out.captured()
+                .iter()
+                .any(|line| line.contains("already registered")),
+            "{:?}",
+            out.captured()
+        );
     }
 
     #[test]

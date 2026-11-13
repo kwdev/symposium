@@ -13,7 +13,8 @@ use anyhow::{Context, Result};
 use symposium_install::UpdateLevel;
 
 use crate::agents::Agent;
-use crate::config::Symposium;
+use crate::compile;
+use crate::config::{INSTALLED_PLUGINS_SUBDIR, Symposium};
 use crate::dir_walk::{self, EntryKind};
 use crate::output::{Output, display_path};
 use crate::plugins;
@@ -27,6 +28,7 @@ use std::sync::Arc;
 /// containing this marker that isn't in the freshly-installed set, leaving
 /// user-managed skill directories (which lack the marker) untouched.
 pub(crate) const MARKER_FILE: &str = ".symposium";
+const PLUGIN_DATA_DIR: &str = "plugin-data";
 
 /// Create `path` and any missing ancestors up to `boundary`.
 ///
@@ -71,6 +73,13 @@ fn mark_generated_skill_directory(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The install directory name a skill falls back to when its plain name is
+/// unavailable: `<skill-name>-<origin-hash>`. The revocation cleanup rebuilds
+/// the same names, so both go through here.
+fn suffixed_skill_dir(skill_name: &str, origin_hash: &str) -> String {
+    format!("{skill_name}-{origin_hash}")
+}
+
 fn slot_taken(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok()
 }
@@ -79,7 +88,20 @@ fn slot_taken(path: &Path) -> bool {
 /// symposium-managed skill directory? Returns `false` for user-authored skills,
 /// for any directory symposium did not create, and for any symlink.
 fn is_managed_skill_dir(path: &Path) -> bool {
-    fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir()) && path.join(MARKER_FILE).exists()
+    fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir()) && has_symposium_marker(path)
+}
+
+pub(crate) fn has_symposium_marker(dir: &Path) -> bool {
+    dir.join(MARKER_FILE).is_file()
+}
+
+pub(crate) fn ignore_in_git(dir: &Path) -> Result<()> {
+    let path = dir.join(".gitignore");
+    if path.is_file() {
+        return Ok(());
+    }
+    fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    fs::write(&path, "*\n").with_context(|| format!("write {}", path.display()))
 }
 
 /// One entry of a source tree as the installer sees it: a path relative to the
@@ -97,55 +119,41 @@ type TreeEntry = (PathBuf, EntryKind);
 ///
 /// Sorting by relative path puts each directory before its children, so a
 /// caller may create or read the entries in order.
-fn walk_tree(root: &Path) -> Result<(Vec<TreeEntry>, Vec<String>)> {
-    let mut entries = Vec::new();
-    let mut skipped = Vec::new();
-    let mut ancestors = dir_walk::Ancestors::rooted_at(root);
-    walk_tree_inner(root, root, &mut ancestors, &mut entries, &mut skipped)?;
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok((entries, skipped))
+pub(crate) fn unfollowed_entries(root: &Path, package_root: Option<&Path>) -> Vec<String> {
+    walk_tree(root, package_root)
+        .map(|(_, skipped)| skipped)
+        .unwrap_or_default()
 }
 
-fn walk_tree_inner(
-    root: &Path,
-    dir: &Path,
-    ancestors: &mut dir_walk::Ancestors,
-    entries: &mut Vec<TreeEntry>,
-    skipped: &mut Vec<String>,
-) -> Result<()> {
-    let read = match fs::read_dir(dir) {
-        Ok(read) => read,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e).with_context(|| format!("read {}", dir.display())),
-    };
-    for entry in read {
-        let entry = entry?;
-        let path = entry.path();
-        let rel = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
-        let file_type = entry.file_type()?;
-        match dir_walk::resolved_kind(&path, file_type) {
-            Ok(Some(EntryKind::Dir)) => {
-                if !ancestors.enter(&path) {
-                    skipped.push(format!(
-                        "skipping {}: symlink re-enters a directory it is inside",
-                        display_path(&path)
-                    ));
-                    continue;
-                }
-                entries.push((rel, EntryKind::Dir));
-                walk_tree_inner(root, &path, ancestors, entries, skipped)?;
-                ancestors.leave();
-            }
-            Ok(Some(EntryKind::File)) => entries.push((rel, EntryKind::File)),
-            // A socket or a fifo. Never skill content, so never worth a word.
-            Ok(None) => {}
-            Err(e) => skipped.push(format!(
-                "skipping {}: broken symlink ({e})",
-                display_path(&path)
-            )),
+fn walk_tree(root: &Path, package_root: Option<&Path>) -> Result<(Vec<TreeEntry>, Vec<String>)> {
+    let mut skipped = Vec::new();
+    let tree = dir_walk::walk_where(root, &mut |path| {
+        let outside = package_root.is_some_and(|package| !plugins::resolves_inside(package, path));
+        if outside {
+            skipped.push(format!(
+                "skipping {}: resolves outside the package",
+                display_path(path)
+            ));
         }
-    }
-    Ok(())
+        !outside
+    })?;
+    skipped.extend(
+        tree.refused
+            .into_iter()
+            .filter_map(|refused| match refused {
+                dir_walk::Refused::Loop(rel) => Some(format!(
+                    "skipping {}: symlink re-enters a directory it is inside",
+                    display_path(&root.join(rel))
+                )),
+                dir_walk::Refused::BrokenLink(rel, e) => Some(format!(
+                    "skipping {}: broken symlink ({e})",
+                    display_path(&root.join(rel))
+                )),
+                // A socket or a fifo. Never skill content, so never worth a word.
+                dir_walk::Refused::Special(_) => None,
+            }),
+    );
+    Ok((tree.entries, skipped))
 }
 
 /// Recursively copy the contents of `src` into `dst`. Creates `dst` if
@@ -154,11 +162,14 @@ fn walk_tree_inner(
 ///
 /// Entries the walk cannot follow are reported and skipped, so a single broken
 /// link leaves the rest of the skill installed instead of failing the sync.
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
-    let (entries, skipped) = walk_tree(src)?;
-    for message in skipped {
-        tracing::info!(report = %crate::report::ReportEvent::Warning { message });
-    }
+pub(crate) fn copy_dir_recursive(
+    src: &Path,
+    dst: &Path,
+    package_root: Option<&Path>,
+    warned: &mut BTreeSet<String>,
+) -> Result<()> {
+    let (entries, skipped) = walk_tree(src, package_root)?;
+    report_skipped(skipped, warned);
     fs::create_dir_all(dst).with_context(|| format!("create {}", dst.display()))?;
     for (rel, kind) in entries {
         let dst_path = dst.join(&rel);
@@ -178,17 +189,20 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
+pub(crate) type TreeContents = Vec<(PathBuf, Option<Vec<u8>>)>;
+
 /// Collect `dir`'s tree for comparison: every directory and regular file under
 /// it, as a path relative to `dir` paired with the file's contents (`None` for
 /// a directory). Symlinks resolve exactly as [`copy_dir_recursive`] resolves
 /// them, so the source of an installed skill and its destination compare equal.
 ///
 /// Skips the `.symposium` marker and `.gitignore`, which are managed metadata
-/// rather than skill content. Entries the walk refuses are dropped silently:
-/// the copy this comparison guards reports them, and reporting them here too
-/// would say the same thing twice per sync.
-fn collect_dir_contents(dir: &Path) -> Result<Vec<(PathBuf, Option<Vec<u8>>)>> {
-    let (entries, _skipped) = walk_tree(dir)?;
+/// rather than skill content.
+pub(crate) fn collect_dir_contents(
+    dir: &Path,
+    package_root: Option<&Path>,
+) -> Result<(TreeContents, Vec<String>)> {
+    let (entries, skipped) = walk_tree(dir, package_root)?;
     let mut out = Vec::with_capacity(entries.len());
     for (rel, kind) in entries {
         let name = rel.to_string_lossy();
@@ -204,14 +218,97 @@ fn collect_dir_contents(dir: &Path) -> Result<Vec<(PathBuf, Option<Vec<u8>>)>> {
         };
         out.push((rel, contents));
     }
-    Ok(out)
+    Ok((out, skipped))
+}
+
+pub(crate) fn report_skipped(skipped: Vec<String>, warned: &mut BTreeSet<String>) {
+    for message in skipped {
+        if warned.insert(message.clone()) {
+            tracing::info!(report = %crate::report::ReportEvent::Warning { message });
+        }
+    }
+}
+
+pub(crate) fn recently_synced(dir: &Path, debounce: Duration) -> bool {
+    !debounce.is_zero()
+        && fs::metadata(dir.join(MARKER_FILE))
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|mtime| SystemTime::now().duration_since(mtime).ok())
+            .is_some_and(|elapsed| elapsed < debounce)
+}
+
+pub(crate) fn sync_tree(dest: &Path, sorted: &TreeContents) -> Result<bool> {
+    if slot_taken(dest) && !is_managed_skill_dir(dest) {
+        anyhow::bail!("{} is not managed by symposium", display_path(dest));
+    }
+    if dest.is_dir() && collect_dir_contents(dest, None)?.0 == *sorted {
+        touch_marker(&dest.join(MARKER_FILE))?;
+        return Ok(false);
+    }
+    let parent = dest.parent().expect("plugin dir must have parent");
+    fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    install_staged(dest, |staging| {
+        touch_marker(&staging.join(MARKER_FILE))?;
+        for (rel, data) in sorted {
+            let path = staging.join(rel);
+            match data {
+                None => fs::create_dir_all(&path),
+                Some(bytes) => fs::write(&path, bytes),
+            }
+            .with_context(|| format!("write {}", path.display()))?;
+        }
+        Ok(())
+    })?;
+    Ok(true)
+}
+
+pub(crate) fn sync_plugin_dir(source: &Path, dest: &Path, debounce: Duration) -> Result<bool> {
+    if recently_synced(dest, debounce)
+        && crate::compile::skill_dir_names(source) == crate::compile::skill_dir_names(dest)
+    {
+        return Ok(false);
+    }
+    sync_tree(dest, &collect_dir_contents(source, None)?.0)
+}
+
+pub(crate) fn reap_unlisted(parent: &Path, keep: impl Fn(&Path) -> bool) {
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !is_managed_skill_dir(&path) || keep(&path) {
+            continue;
+        }
+        match fs::remove_dir_all(&path) {
+            Ok(()) => {
+                tracing::info!(
+                    report = %crate::report::ReportEvent::SkillRemoved {
+                        path: display_path(&path),
+                    },
+                );
+            }
+            Err(e) => {
+                tracing::info!(
+                    report = %crate::report::ReportEvent::Warning {
+                        message: format!("failed to remove stale {}: {e}", display_path(&path)),
+                    },
+                );
+            }
+        }
+    }
 }
 
 /// Returns true if the source directory's content differs from the
 /// destination's content (ignoring managed metadata files).
-fn dir_contents_differ(source_dir: &Path, dest_dir: &Path) -> Result<bool> {
-    let src = collect_dir_contents(source_dir)?;
-    let dst = collect_dir_contents(dest_dir)?;
+fn dir_contents_differ(
+    source_dir: &Path,
+    dest_dir: &Path,
+    package_root: Option<&Path>,
+) -> Result<bool> {
+    let (src, _) = collect_dir_contents(source_dir, package_root)?;
+    let (dst, _) = collect_dir_contents(dest_dir, None)?;
     Ok(src != dst)
 }
 
@@ -233,6 +330,8 @@ fn sync_skill_dir(
     dest_dir: &Path,
     project_root: &Path,
     debounce: Duration,
+    warned: &mut BTreeSet<String>,
+    package_root: Option<&Path>,
 ) -> Result<bool> {
     if dest_dir == source_dir {
         return Ok(false);
@@ -240,54 +339,57 @@ fn sync_skill_dir(
 
     // If the destination doesn't exist yet, do a fresh install.
     if !slot_taken(dest_dir) {
-        install_skill_dir(source_dir, dest_dir, project_root)?;
+        install_skill_dir(source_dir, dest_dir, project_root, warned, package_root)?;
         return Ok(true);
     }
 
     // Debounce: if we synced recently, skip the content comparison.
-    let marker_path = dest_dir.join(MARKER_FILE);
-    if !debounce.is_zero()
-        && let Ok(meta) = fs::metadata(&marker_path)
-        && let Ok(mtime) = meta.modified()
-        && let Ok(elapsed) = SystemTime::now().duration_since(mtime)
-        && elapsed < debounce
-    {
+    if recently_synced(dest_dir, debounce) {
         tracing::debug!(dest = %dest_dir.display(), "skill sync debounced");
         return Ok(false);
     }
 
     // Compare content (excluding managed metadata).
-    if !dir_contents_differ(source_dir, dest_dir)? {
+    let marker_path = dest_dir.join(MARKER_FILE);
+    if !dir_contents_differ(source_dir, dest_dir, package_root)? {
         // Content is identical — just touch the marker to reset debounce.
         touch_marker(&marker_path)?;
         return Ok(false);
     }
 
     // Content changed: replace entirely.
-    install_skill_dir(source_dir, dest_dir, project_root)?;
+    install_skill_dir(source_dir, dest_dir, project_root, warned, package_root)?;
     Ok(true)
 }
 
-fn install_skill_dir(source_dir: &Path, dest_dir: &Path, project_root: &Path) -> Result<()> {
+fn install_skill_dir(
+    source_dir: &Path,
+    dest_dir: &Path,
+    project_root: &Path,
+    warned: &mut BTreeSet<String>,
+    package_root: Option<&Path>,
+) -> Result<()> {
     let parent = dest_dir.parent().expect("skill dir must have parent");
     create_managed_dir_all(parent, project_root)?;
+    install_staged(dest_dir, |staging| {
+        mark_generated_skill_directory(staging)?;
+        copy_dir_recursive(source_dir, staging, package_root, warned)?;
+        mark_generated_skill_directory(staging)
+    })
+}
+
+fn install_staged(dest: &Path, fill: impl FnOnce(&Path) -> Result<()>) -> Result<()> {
+    let parent = dest.parent().expect("install slot must have parent");
     let mut staging = tempfile::Builder::new()
         .prefix(".symposium-tmp-")
         .tempdir_in(parent)
         .with_context(|| format!("create staging dir in {}", parent.display()))?;
-    mark_generated_skill_directory(staging.path())?;
-    copy_dir_recursive(source_dir, staging.path())?;
-    mark_generated_skill_directory(staging.path())?;
-    if slot_taken(dest_dir) {
-        fs::remove_dir_all(dest_dir).with_context(|| format!("remove {}", dest_dir.display()))?;
+    fill(staging.path())?;
+    if slot_taken(dest) {
+        fs::remove_dir_all(dest).with_context(|| format!("remove {}", dest.display()))?;
     }
-    fs::rename(staging.path(), dest_dir).with_context(|| {
-        format!(
-            "rename {} -> {}",
-            staging.path().display(),
-            dest_dir.display()
-        )
-    })?;
+    fs::rename(staging.path(), dest)
+        .with_context(|| format!("rename {} -> {}", staging.path().display(), dest.display()))?;
     staging.disable_cleanup(true);
     Ok(())
 }
@@ -322,7 +424,8 @@ async fn resolve_custom_predicate_entries(
         };
 
         let acquired =
-            match crate::installation::acquire_installation(sym, install, None, None, update).await
+            match crate::installation::acquire_installation(sym, install, None, None, update, None)
+                .await
             {
                 Ok(a) => a,
                 Err(e) => {
@@ -362,7 +465,11 @@ async fn resolve_custom_predicate_entries(
 
 /// Run the full sync: discover applicable skills, install into agent dirs,
 /// clean up stale installations.
-pub async fn sync(sym: &Symposium, ws: &Arc<Workspace>, update: UpdateLevel) -> Result<()> {
+pub async fn sync(
+    sym: &Symposium,
+    ws: &Arc<Workspace>,
+    update: UpdateLevel,
+) -> Result<Vec<(Agent, Vec<String>)>> {
     if let Some(error) = sym.config_error() {
         anyhow::bail!(
             "not syncing: {} could not be read; fix or remove it, then run the command again\n{error}",
@@ -401,19 +508,20 @@ pub async fn sync(sym: &Symposium, ws: &Arc<Workspace>, update: UpdateLevel) -> 
     // custom predicate results survive across sync runs; results are persisted
     // at the end of this evaluation pass.
     let pms = ws.pms();
-    let used = crate::discovery::used_plugins(sym, pms, &registry.plugins, &project_root);
+    let used = crate::discovery::used_plugins(sym, pms, &registry.plugins, &project_root).await;
     let predicate_cache_path =
         crate::predicate_cache::PredicateCache::path_for_workspace(sym.cache_dir(), &project_root);
     let mut ctx =
         crate::predicate::PredicateContext::with_custom_predicates(&dep_ids, custom_entries)
             .with_used(&used)
+            .with_cwd(ws.start())
             .with_disk_cache(&predicate_cache_path);
 
     // The active plugin set: registry plugins plus the crate-sourced plugins
     // reached through `[[plugins]]` chained references and dependency
     // enablement. Every facet resolves over this one set, so a crate plugin's
     // skills and MCP servers install exactly like a registry plugin's.
-    let active = plugins::active_plugins(
+    let plugins::ActivePlugins { active, revoked } = plugins::resolve_active_plugins(
         sym,
         &registry,
         pms,
@@ -426,6 +534,16 @@ pub async fn sync(sym: &Symposium, ws: &Arc<Workspace>, update: UpdateLevel) -> 
     // Find all applicable skills.
     let applicable = skills::collect_skills(sym, &active, &mut ctx, update).await;
 
+    // The install directory names (plain and suffixed) of the skills a revoked
+    // package would install. A revocation overrides the cleanup safety net
+    // below: these come off even when cleanup is otherwise skipped. The
+    // listing runs nothing from the revoked package: none of its predicates
+    // is evaluated, and a `source.git` group is read from the git cache only.
+    let revoked_dirs: BTreeSet<String> = skills::skills_on_disk(sym, &revoked)
+        .into_iter()
+        .flat_map(|(name, origin_hash)| [suffixed_skill_dir(&name, &origin_hash), name])
+        .collect();
+
     // Dedup by `(skill_name, origin_hash)`: two crate origins with the same
     // (name, version, skill-path-within-crate) collapse (the same skill bytes
     // reached through two plugins); skills from genuinely different locations —
@@ -434,15 +552,17 @@ pub async fn sync(sym: &Symposium, ws: &Arc<Workspace>, update: UpdateLevel) -> 
     // plain name and their origin hash so we can decide later whether each one
     // needs an `<name>-<hash>` suffix to avoid collisions.
     let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
-    let mut to_install: Vec<(String, String, &std::path::Path)> = Vec::new();
-    let mut name_counts: std::collections::BTreeMap<String, usize> =
-        std::collections::BTreeMap::new();
+    let mut to_install: Vec<(String, String, &Path, Option<&Path>)> = Vec::new();
 
     for entry in &applicable {
         let name = entry.skill.name().to_string();
         if seen.insert((name.clone(), entry.origin_hash.clone())) {
-            *name_counts.entry(name.clone()).or_default() += 1;
-            to_install.push((name, entry.origin_hash.clone(), &entry.skill.path));
+            to_install.push((
+                name,
+                entry.origin_hash.clone(),
+                &entry.skill.path,
+                entry.agent_plugin_root.as_deref(),
+            ));
         }
     }
 
@@ -450,9 +570,16 @@ pub async fn sync(sym: &Symposium, ws: &Arc<Workspace>, update: UpdateLevel) -> 
     let mut mcp_servers: Vec<sacp::schema::McpServer> = Vec::new();
     for p in &active {
         if p.applies(&mut ctx) {
-            mcp_servers.extend(p.manifest.applicable_mcp_servers(&mut ctx));
+            let servers = p.manifest.applicable_mcp_servers(&mut ctx);
+            mcp_servers.extend(package_mcp_servers(sym, p, servers));
         }
     }
+    let global = compile::global_plugins(sym, pms, &registry, &active, &mut ctx, update).await;
+    let project = if Agent::Claude.is_configured(sym) {
+        compile::project_plugins(&active, &applicable, &global)
+    } else {
+        Vec::new()
+    };
     if let Err(e) = ctx.persist_disk_cache(&predicate_cache_path) {
         tracing::warn!(
             path = %predicate_cache_path.display(),
@@ -490,6 +617,63 @@ pub async fn sync(sym: &Symposium, ws: &Arc<Workspace>, update: UpdateLevel) -> 
     // nor an MCP entry. Both cleanups read this one decision.
     let failed_pms = ws.failed();
     let skip_cleanup = !registry.unreadable_registries.is_empty() || !failed_pms.is_empty();
+
+    let mut warned = BTreeSet::new();
+    let plugins_root = sym.config_dir().join(INSTALLED_PLUGINS_SUBDIR);
+    // A revoked package's staged plugin comes off first, so the hold-back
+    // below cannot hand it to the agents again.
+    if skip_cleanup && !revoked.is_empty() {
+        let revoked_plugins: BTreeSet<String> = revoked
+            .iter()
+            .filter_map(|p| compile::normalize_name(&p.manifest.name))
+            .collect();
+        for root in [&plugins_root, &compile::project_plugins_root(&project_root)] {
+            reap_unlisted(root, |dir| {
+                !dir.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| revoked_plugins.contains(name))
+            });
+        }
+    }
+    let compiled = compile::compile(&plugins_root, &global, debounce, &mut warned, skip_cleanup);
+    crate::agents::sync_marketplace_index(sym, &compiled.plugins);
+    let project_compiled =
+        compile::compile_project(&project_root, &project, debounce, &mut warned, skip_cleanup);
+
+    let mut plugin_changes = Vec::new();
+    let mut copied: std::collections::BTreeMap<_, BTreeSet<_>> = std::collections::BTreeMap::new();
+    let mut copies: std::collections::BTreeMap<&str, Vec<_>> = std::collections::BTreeMap::new();
+    for agent_name in &agent_names {
+        let Ok(agent) = Agent::from_config_name(agent_name) else {
+            continue;
+        };
+        let user = agent.deliver_user_plugins(sym, &compiled.plugins);
+        let project = agent.deliver_project_plugins(sym, &project_root, &project_compiled.plugins);
+        let mut as_plugins = BTreeSet::new();
+        if let Some(delivery) = &user {
+            as_plugins.extend(compiled.skill_origins_of(&delivery.delivered));
+        }
+        if let Some(delivery) = &project {
+            as_plugins.extend(project_compiled.skill_origins_of(&delivery.delivered));
+        }
+        if user.is_some() || project.is_some() {
+            let updated = user.into_iter().chain(project).flat_map(|d| d.updated);
+            plugin_changes.push((agent, updated.collect()));
+        }
+        let agent_copies: Vec<_> = to_install
+            .iter()
+            .filter(|(_, origin_hash, _, _)| !as_plugins.contains(origin_hash))
+            .collect();
+        copied
+            .entry(skills_parent_dir(agent, &project_root))
+            .or_default()
+            .extend(
+                agent_copies
+                    .iter()
+                    .map(|(name, origin_hash, _, _)| (name, origin_hash)),
+            );
+        copies.insert(agent_name, agent_copies);
+    }
 
     for agent_name in &agent_names {
         let Ok(agent) = Agent::from_config_name(agent_name) else {
@@ -569,7 +753,12 @@ pub async fn sync(sym: &Symposium, ws: &Arc<Workspace>, update: UpdateLevel) -> 
             }
         }
 
-        for (skill_name, origin_hash, skill_source) in &to_install {
+        let mut name_counts = std::collections::BTreeMap::new();
+        for (skill_name, _) in &copied[&skills_parent_dir(agent, &project_root)] {
+            *name_counts.entry(*skill_name).or_default() += 1;
+        }
+
+        for (skill_name, origin_hash, skill_source, package_root) in &copies[agent_name.as_str()] {
             // `skill_source` is the path to the SKILL.md file; the skill
             // directory is its parent.
             let source_dir = match skill_source.parent() {
@@ -582,16 +771,15 @@ pub async fn sync(sym: &Symposium, ws: &Arc<Workspace>, update: UpdateLevel) -> 
                 }
             };
 
-            // The skill's source already sits at this agent's install slot
-            // (a workspace `.agents/skills/` skill, on an agent that reads
-            // that same directory) — it is in place as user content, not
-            // something to copy.
             let plain_dir = agent.project_skill_dir(&project_root, skill_name);
-            let in_place = match (source_dir.canonicalize(), plain_dir.canonicalize()) {
+            let shared_dir = project_root.join(".agents").join("skills").join(skill_name);
+            let is_source = |dir: &Path| match (source_dir.canonicalize(), dir.canonicalize()) {
                 (Ok(a), Ok(b)) => a == b,
                 _ => false,
             };
-            if in_place {
+            let already_in_place = is_source(&plain_dir)
+                || (agent.reads_vendor_neutral_skills() && is_source(&shared_dir));
+            if already_in_place {
                 continue;
             }
 
@@ -607,7 +795,7 @@ pub async fn sync(sym: &Symposium, ws: &Arc<Workspace>, update: UpdateLevel) -> 
             let dir_name = if unique_name && plain_available {
                 skill_name.clone()
             } else {
-                format!("{skill_name}-{}", origin_hash)
+                suffixed_skill_dir(skill_name, origin_hash)
             };
             let dest_dir = agent.project_skill_dir(&project_root, &dir_name);
 
@@ -625,7 +813,14 @@ pub async fn sync(sym: &Symposium, ws: &Arc<Workspace>, update: UpdateLevel) -> 
             }
 
             installed_dirs.insert(dest_dir.clone());
-            match sync_skill_dir(source_dir, &dest_dir, &project_root, debounce) {
+            match sync_skill_dir(
+                source_dir,
+                &dest_dir,
+                &project_root,
+                debounce,
+                &mut warned,
+                *package_root,
+            ) {
                 Ok(true) => {
                     tracing::info!(
                         report = %crate::report::ReportEvent::SkillInstalled {
@@ -647,6 +842,30 @@ pub async fn sync(sym: &Symposium, ws: &Arc<Workspace>, update: UpdateLevel) -> 
         }
     }
 
+    // A revoked package's MCP servers come off wherever Symposium registered
+    // them: every agent, every file in the ledger (user scope included, the
+    // default), even while the cleanup below is held back. The names come
+    // from its manifest, with no predicate evaluated; a name an active plugin
+    // still declares stays, since the entry may now be that plugin's.
+    let still_declared: BTreeSet<&str> = active
+        .iter()
+        .flat_map(|p| p.manifest.mcp_servers.iter())
+        .map(|s| crate::agents::mcp_server_name(&s.server))
+        .collect();
+    let revoked_mcp: BTreeSet<&str> = revoked
+        .iter()
+        .flat_map(|p| p.manifest.mcp_servers.iter())
+        .map(|s| crate::agents::mcp_server_name(&s.server))
+        .filter(|name| !still_declared.contains(name))
+        .collect();
+    if !revoked_mcp.is_empty() {
+        unregister_recorded_mcp_servers(
+            sym,
+            |_, registration| revoked_mcp.contains(registration.name.as_str()),
+            out,
+        );
+    }
+
     // Stale-skill cleanup: scan every agent's skills parent directory (across
     // all known agents, so we also clean up after agents removed from config)
     // and remove subdirs containing the marker that we didn't just install.
@@ -661,40 +880,29 @@ pub async fn sync(sym: &Symposium, ws: &Arc<Workspace>, update: UpdateLevel) -> 
         let Ok(parent) = skills_parent_dir(agent, &project_root).canonicalize() else {
             continue;
         };
-        if skip_cleanup || !scanned.insert(parent.clone()) {
+        if (skip_cleanup && revoked_dirs.is_empty()) || !scanned.insert(parent.clone()) {
             continue;
         }
-        let Ok(entries) = fs::read_dir(&parent) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if installed.contains(&path) || !is_managed_skill_dir(&path) {
-                continue;
-            }
-            match fs::remove_dir_all(&path) {
-                Ok(()) => {
-                    tracing::info!(
-                        report = %crate::report::ReportEvent::SkillRemoved {
-                            path: display_path(&path),
-                        },
-                    );
-                }
-                Err(e) => {
-                    tracing::info!(
-                        report = %crate::report::ReportEvent::Warning {
-                            message: format!("failed to remove stale {}: {e}", display_path(&path)),
-                        },
-                    );
-                }
-            }
-        }
+        // While cleanup is skipped, only directories named like a revoked
+        // package's skills are removed. A plain-named directory belonging
+        // to another, currently unreadable origin can be removed too; its
+        // source is untouched, so the next sync that can read it
+        // reinstalls it.
+        reap_unlisted(&parent, |dir| {
+            installed.contains(dir)
+                || compile::is_plugin_dir(dir)
+                || (skip_cleanup
+                    && !dir
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| revoked_dirs.contains(name)))
+        });
     }
     for name in &registry.unreadable_registries {
         tracing::info!(
             report = %crate::report::ReportEvent::Warning {
                 message: format!(
-                    "registry `{name}` could not be fully read; skipped cleanup of installed skills"
+                    "registry `{name}` could not be fully read; skipped cleanup of installed skills and plugins"
                 ),
             },
         );
@@ -733,6 +941,10 @@ pub async fn sync(sym: &Symposium, ws: &Arc<Workspace>, update: UpdateLevel) -> 
         },
         out,
     );
+    if !skip_cleanup {
+        unregister_user_plugins(sym);
+        unregister_project_plugins(sym, &project_root);
+    }
 
     if to_install.is_empty() {
         tracing::info!(
@@ -742,7 +954,7 @@ pub async fn sync(sym: &Symposium, ws: &Arc<Workspace>, update: UpdateLevel) -> 
         );
     }
 
-    Ok(())
+    Ok(plugin_changes)
 }
 
 fn lock_sync(sym: &Symposium) -> Result<fs::File> {
@@ -760,21 +972,30 @@ fn lock_sync(sym: &Symposium) -> Result<fs::File> {
     Ok(file)
 }
 
+pub(crate) fn unregister_user_plugins(sym: &Symposium) {
+    for &agent in Agent::all() {
+        if !agent.is_configured(sym) {
+            agent.deliver_user_plugins(sym, &[]);
+        }
+    }
+}
+
+fn unregister_project_plugins(sym: &Symposium, project_root: &Path) {
+    for &agent in Agent::all() {
+        if !agent.is_configured(sym) {
+            agent.deliver_project_plugins(sym, project_root, &[]);
+        }
+    }
+}
+
 /// Register global hooks for all configured agents.
 /// Register hooks for all configured agents. Uses `home_dir` (global scope).
 /// Called from `init` after writing the user config.
-pub async fn register_hooks(sym: &Symposium, out: &Output) -> Result<()> {
-    let registry = plugins::load_registry(sym).await;
-    let mcp_servers: Vec<sacp::schema::McpServer> = registry
-        .plugins
-        .iter()
-        .flat_map(|p| p.manifest.mcp_servers.iter().map(|s| s.server.clone()))
-        .collect();
-
+pub fn register_hooks(sym: &Symposium, out: &Output) -> Result<()> {
     let agent_names: Vec<String> = sym.config.agents.iter().map(|a| a.name.clone()).collect();
 
-    // `init` has no workspace in hand, so this is the user-level pass only;
-    // the project-level file is written by the first `sync` in a workspace.
+    // `init` has no workspace to evaluate a plugin's gate against, so MCP
+    // servers are left to `sync`.
     let home = sym.home_dir();
     for agent_name in &agent_names {
         let Ok(agent) = Agent::from_config_name(agent_name) else {
@@ -782,19 +1003,6 @@ pub async fn register_hooks(sym: &Symposium, out: &Output) -> Result<()> {
             continue;
         };
         agent.register_hooks(home, sym, out)?;
-        let names = agent.register_mcp_servers(
-            crate::agents::McpScope::User,
-            home,
-            sym,
-            &mcp_servers,
-            out,
-        )?;
-        record_mcp_registrations(
-            sym,
-            agent,
-            &agent.mcp_config_path(crate::agents::McpScope::User, home, sym),
-            names,
-        );
     }
 
     // Unregister hooks for agents no longer configured
@@ -811,6 +1019,53 @@ pub async fn register_hooks(sym: &Symposium, out: &Output) -> Result<()> {
     );
 
     Ok(())
+}
+
+fn package_mcp_servers(
+    sym: &Symposium,
+    plugin: &plugins::Plugin,
+    servers: Vec<sacp::schema::McpServer>,
+) -> Vec<sacp::schema::McpServer> {
+    let Some(root) = &plugin.agent_plugin_root else {
+        return servers;
+    };
+    let stdio =
+        |server: &sacp::schema::McpServer| matches!(server, sacp::schema::McpServer::Stdio(_));
+    if !servers.iter().any(stdio) {
+        return servers;
+    }
+    match plugin_data_dir(sym, &plugin.canonical) {
+        Ok(data) => servers
+            .into_iter()
+            .map(|server| {
+                plugins::launched_from(plugins::with_plugin_vars(server, root, &data), root)
+            })
+            .collect(),
+        Err(e) => {
+            tracing::info!(
+                report = %crate::report::ReportEvent::Warning {
+                    message: format!(
+                        "skipping the stdio MCP servers of plugin `{}`: {e:#}",
+                        plugin.manifest.name
+                    ),
+                },
+            );
+            servers
+                .into_iter()
+                .filter(|server| !stdio(server))
+                .collect()
+        }
+    }
+}
+
+fn plugin_data_dir(sym: &Symposium, id: &crate::pm::PackageId) -> Result<PathBuf> {
+    let dir = sym
+        .config_dir()
+        .join(PLUGIN_DATA_DIR)
+        .join(&id.pm)
+        .join(&id.name);
+    fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", display_path(&dir)))?;
+    Ok(fs::canonicalize(&dir)?)
 }
 
 fn record_mcp_registrations(sym: &Symposium, agent: Agent, file: &Path, names: Vec<String>) {
@@ -876,6 +1131,20 @@ fn unregister_recorded_mcp_servers(
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_failed_tree_write_keeps_the_installed_copy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("plugin");
+        let installed: TreeContents = vec![(PathBuf::from("a.txt"), Some(b"one".to_vec()))];
+        assert!(sync_tree(&dest, &installed).unwrap());
+
+        let broken: TreeContents = vec![(PathBuf::from("missing/b.txt"), Some(b"two".to_vec()))];
+        assert!(sync_tree(&dest, &broken).is_err());
+
+        assert_eq!(fs::read_to_string(dest.join("a.txt")).unwrap(), "one");
+        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 1);
+    }
+
     /// A source tree holding, in order: a plain file, a nested directory, an
     /// empty directory, a link to a file outside the tree, a link to a
     /// directory outside the tree, a broken link, and a link back to the root.
@@ -913,7 +1182,7 @@ mod tests {
         let src = tree_with_symlinks(tmp.path());
         let dst = tmp.path().join("dst");
 
-        copy_dir_recursive(&src, &dst).unwrap();
+        copy_dir_recursive(&src, &dst, None, &mut BTreeSet::new()).unwrap();
 
         assert!(
             !fs::symlink_metadata(dst.join("lib.txt"))
@@ -949,7 +1218,7 @@ mod tests {
         );
 
         assert!(
-            !dir_contents_differ(&src, &dst).unwrap(),
+            !dir_contents_differ(&src, &dst, None).unwrap(),
             "the source scan must see exactly what the copier wrote, or every \
              sync turns into a full recopy"
         );
@@ -961,7 +1230,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let src = tree_with_symlinks(tmp.path());
 
-        let (_, skipped) = walk_tree(&src).unwrap();
+        let (_, skipped) = walk_tree(&src, None).unwrap();
 
         assert!(
             skipped
@@ -984,11 +1253,67 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let src = tree_with_symlinks(tmp.path());
         let dst = tmp.path().join("dst");
-        copy_dir_recursive(&src, &dst).unwrap();
+        copy_dir_recursive(&src, &dst, None, &mut BTreeSet::new()).unwrap();
 
         fs::write(tmp.path().join("outside/lib.txt"), "edited").unwrap();
 
-        assert!(dir_contents_differ(&src, &dst).unwrap());
+        assert!(dir_contents_differ(&src, &dst, None).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_package_root_skips_what_resolves_outside_it() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        fs::create_dir(root.join("outside")).unwrap();
+        fs::write(root.join("outside/lib.txt"), "outside").unwrap();
+        let package = root.join("package");
+        let skill = package.join("skills/s");
+        fs::create_dir_all(&skill).unwrap();
+        fs::create_dir(package.join("shared")).unwrap();
+        fs::write(package.join("shared/notes.txt"), "inside").unwrap();
+        fs::write(skill.join("SKILL.md"), "skill").unwrap();
+        symlink("../../shared/notes.txt", skill.join("notes.txt")).unwrap();
+        symlink("../../shared", skill.join("shared")).unwrap();
+        symlink("../../../outside/lib.txt", skill.join("lib.txt")).unwrap();
+        symlink("../../../outside", skill.join("vendor")).unwrap();
+        symlink("../../outside", package.join("skills/linked")).unwrap();
+
+        let inside = ["SKILL.md", "notes.txt", "shared", "shared/notes.txt"];
+        let cases: [(&str, &[&str], usize); 2] =
+            [("skills/s", &inside, 2), ("skills/linked", &[], 1)];
+        for (dir, kept, refused) in cases {
+            let (entries, skipped) = walk_tree(&package.join(dir), Some(&package)).unwrap();
+            let entries: Vec<&str> = entries
+                .iter()
+                .map(|(rel, _)| rel.to_str().unwrap())
+                .collect();
+            assert_eq!(entries, kept, "{dir}");
+            assert_eq!(skipped.len(), refused, "{dir}: {skipped:?}");
+        }
+    }
+
+    #[test]
+    fn only_a_marker_file_marks_a_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let marked = tmp.path().join("marked");
+        let project = tmp.path().join("project");
+        let plain = tmp.path().join("plain");
+        for dir in [&marked, &project, &plain] {
+            fs::create_dir_all(dir.join("guide")).unwrap();
+            fs::write(dir.join("guide/SKILL.md"), "").unwrap();
+        }
+        fs::write(marked.join(MARKER_FILE), "").unwrap();
+        fs::create_dir(project.join(MARKER_FILE)).unwrap();
+
+        for (dir, is_marked) in [(&marked, true), (&project, false), (&plain, false)] {
+            assert_eq!(has_symposium_marker(dir), is_marked, "{}", dir.display());
+            let mut found = Vec::new();
+            skills::find_skill_files_recursive(dir, &mut found);
+            assert_eq!(found.is_empty(), is_marked, "{}", dir.display());
+        }
     }
 
     #[test]
@@ -1000,10 +1325,10 @@ mod tests {
         fs::write(src.join("sub/a.txt"), "a").unwrap();
         let dst = tmp.path().join("dst");
 
-        copy_dir_recursive(&src, &dst).unwrap();
+        copy_dir_recursive(&src, &dst, None, &mut BTreeSet::new()).unwrap();
 
         assert_eq!(fs::read_to_string(dst.join("sub/a.txt")).unwrap(), "a");
-        assert!(!dir_contents_differ(&src, &dst).unwrap());
+        assert!(!dir_contents_differ(&src, &dst, None).unwrap());
     }
 
     /// Managed metadata is excluded from the comparison, so writing the marker
@@ -1016,10 +1341,10 @@ mod tests {
         fs::write(src.join("SKILL.md"), "skill").unwrap();
         let dst = tmp.path().join("dst");
 
-        copy_dir_recursive(&src, &dst).unwrap();
+        copy_dir_recursive(&src, &dst, None, &mut BTreeSet::new()).unwrap();
         mark_generated_skill_directory(&dst).unwrap();
 
-        assert!(!dir_contents_differ(&src, &dst).unwrap());
+        assert!(!dir_contents_differ(&src, &dst, None).unwrap());
     }
 
     #[test]
@@ -1038,7 +1363,14 @@ mod tests {
 
         // Either choose another staging path or fail safely. Neither outcome
         // may delete or adopt this pre-existing, unmarked directory.
-        let _ = sync_skill_dir(&src, &skills.join("alpha"), tmp.path(), Duration::ZERO);
+        let _ = sync_skill_dir(
+            &src,
+            &skills.join("alpha"),
+            tmp.path(),
+            Duration::ZERO,
+            &mut BTreeSet::new(),
+            None,
+        );
 
         assert_eq!(
             fs::read_to_string(&notes).expect("install must preserve user-owned files"),
@@ -1065,11 +1397,31 @@ mod tests {
         let skills = tmp.path().join("skills");
         let dst = skills.join("alpha");
 
-        assert!(sync_skill_dir(&src, &dst, tmp.path(), Duration::ZERO).is_err());
+        assert!(
+            sync_skill_dir(
+                &src,
+                &dst,
+                tmp.path(),
+                Duration::ZERO,
+                &mut BTreeSet::new(),
+                None
+            )
+            .is_err()
+        );
         assert_eq!(fs::read_dir(&skills).unwrap().count(), 0);
 
         fs::set_permissions(&notes, fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(sync_skill_dir(&src, &dst, tmp.path(), Duration::ZERO).unwrap());
+        assert!(
+            sync_skill_dir(
+                &src,
+                &dst,
+                tmp.path(),
+                Duration::ZERO,
+                &mut BTreeSet::new(),
+                None
+            )
+            .unwrap()
+        );
         assert!(dst.join(MARKER_FILE).exists());
         assert_eq!(fs::read_to_string(dst.join("notes.txt")).unwrap(), "notes");
     }

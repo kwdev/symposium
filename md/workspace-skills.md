@@ -2,7 +2,7 @@
 
 In addition to adding skills based on your dependencies, Symposium will also install skills your workspace defines for itself: skills found in `skills/` or `.agents/skills` in the workspace root or any member crate install into the directory appropriate for your configured agent(s).
 
-This allows your project to add skills in one central location that will work for all developers, regardless of which agent they use (for example, Claude Code users will have the skills synced to `.claude/skills`).
+This allows your project to add skills in one central location that will work for all developers, regardless of which agent they use (for example, Claude Code users get each workspace plugin below as a plugin in `.claude/skills/<plugin>/`, and invoke its skills as `/<plugin>:<skill>` when Claude Code starts at the workspace root).
 
 The default skill location therefore varies depending on the intended audience:
 
@@ -13,7 +13,7 @@ The default skill location therefore varies depending on the intended audience:
 
 ## Workspace plugins
 
-The workspace root and every member crate directory can define a *workspace plugin*: add a `Symposium.toml` manifest (see the [plugin definition](./reference/plugin-definition.md)), or just a bare `skills/` directory — a directory with skills and no manifest counts as a plugin whose only content is those skills.
+The workspace root and every member crate directory can define a *workspace plugin*: add a `Symposium.toml` manifest (see the [plugin definition](./reference/plugin-definition.md)), an [Agent Plugins](./reference/agent-plugins.md) `plugin.json`, or just a bare `skills/` directory. A directory with skills and no manifest counts as a plugin whose only content is those skills.
 
 Workspace plugins are always active while you work in that workspace: no plugin source configuration or `depends-on` gate is needed. A `skills/` directory in a member crate serves double duty: it installs for everyone working in the workspace *and*, once published, for projects that depend on the crate and enable its plugin.
 
@@ -30,6 +30,8 @@ source.path = ".agents/skills"
 
 The second group is how the `.agents/skills` convention works: it is gated by the [`workspace-member()` predicate](./reference/predicates.md), so maintainer skills apply while working in the workspace but never install for dependents of a published crate. (The group can also be turned off globally with `agents-syncing = false` in the [user config](./reference/configuration.md).)
 
+A member whose plugin is an Agent Plugins `plugin.json` gets the skills the format defines, one per direct child of its `skills/` folder, in place of the first group, and keeps the `.agents/skills` group.
+
 Two details specific to workspace manifests:
 
 - `name` may be omitted; it defaults to the directory name.
@@ -43,7 +45,7 @@ Workspace skills are your own notes, so the [skill frontmatter](./reference/skil
 
 ## Recommended git setup
 
-We recommend you commit your `.agents/skills` or `skills/` into the repository. Symposium installs a `.gitignore` file into every skill that it creates, so automatically copied and installed skills should not dirty your git status.
+We recommend you commit your `.agents/skills` or `skills/` into the repository. Symposium installs a `.gitignore` file into every skill and plugin directory that it creates, and into the `.symposium/` directory where it compiles the project's plugins, so automatically copied and installed skills should not dirty your git status.
 
 ## Pre-existing files
 

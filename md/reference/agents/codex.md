@@ -8,6 +8,18 @@ Config name: `codex`
 |-------|------|
 | Project | `.agents/skills/<name>/SKILL.md` |
 
+## Plugins
+
+A plugin enabled with `cargo agents use --global` is installed for you as a Codex plugin:
+
+| What | Where |
+|------|-------|
+| Marketplace | `[marketplaces.symposium]` in `~/.codex/config.toml`, pointing at `~/.symposium/installed/` |
+| Enablement | `[plugins."<plugin>@symposium"]` in the same file |
+| Plugin files | `~/.codex/plugins/cache/symposium/<plugin>/0.0.0/` |
+
+All three follow `$CODEX_HOME` when it is set. Codex lists the plugin in `/plugins` and loads it in every project. Turning it off there writes `enabled = false`, which symposium leaves alone; `codex plugin remove` is undone by the next sync, so remove it with `cargo agents use --remove --global <plugin>`. A plugin installed while a session runs appears in the next session.
+
 ## Hooks
 
 Symposium merges hook entries into Codex's `hooks.json`.
@@ -17,9 +29,9 @@ Symposium merges hook entries into Codex's `hooks.json`.
 | Project | `.codex/hooks.json` |
 | Global | `~/.codex/hooks.json` (`$CODEX_HOME/hooks.json` when set) |
 
-Events registered: `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `SessionStart` (PascalCase).
+Events registered: `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `SessionStart`, `Stop` (PascalCase).
 
-Output format: JSON. Exit code 2 blocks tool use.
+Output format: JSON. For `PreToolUse`, exit code 2 blocks the tool call. For `Stop`, exit code 2 makes Codex continue, using stderr as the continuation prompt.
 
 **Caveat:** Codex runs a hook only after you trust it. Until then it skips the hook, warning at startup; open `/hooks` in Codex to review and trust symposium's entries. A changed entry needs trusting again. Project hooks also require the project itself to be trusted.
 

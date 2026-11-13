@@ -113,6 +113,15 @@ pub struct Config {
     /// User-defined registries (git repos or local paths).
     #[serde(default, rename = "registry", skip_serializing_if = "Vec::is_empty")]
     pub registries: Vec<RegistryConfig>,
+
+    /// Package managers for ecosystems beyond cargo, each a binary speaking
+    /// the PM protocol.
+    #[serde(
+        default,
+        rename = "package-manager",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub package_managers: Vec<PackageManagerConfig>,
 }
 
 /// The `[plugins]` section: enablement, the consent axis.
@@ -161,25 +170,30 @@ impl PluginsConfig {
     }
 
     /// Does `auto-enable` name the package `id` (directly or via `"*"`)?
-    pub fn is_auto_enabled(&self, pms: &PmRegistry, id: &PackageId) -> bool {
-        self.auto_enable
-            .iter()
-            .any(|entry| name_matches(pms, entry, id))
+    pub async fn is_auto_enabled(&self, pms: &PmRegistry, id: &PackageId) -> bool {
+        names_match(pms, self.auto_enable.iter().map(String::as_str), id)
+            .await
+            .unwrap_or(false)
     }
 
-    /// Does `disable` name the package `id`?
-    pub fn is_disabled(&self, pms: &PmRegistry, id: &PackageId) -> bool {
-        self.disable
-            .iter()
-            .any(|entry| name_matches(pms, entry, id))
+    /// Does `disable` name the package `id`? Failure to compare is a denial,
+    /// never permission to activate a potentially disabled package.
+    pub async fn is_disabled(&self, pms: &PmRegistry, id: &PackageId) -> bool {
+        names_match(pms, self.disable.iter().map(String::as_str), id)
+            .await
+            .unwrap_or(true)
     }
 
-    /// Is the package `id` enabled by a `use` entry applicable in
-    /// `workspace_root`?
-    pub fn is_used_in(&self, pms: &PmRegistry, id: &PackageId, workspace_root: &Path) -> bool {
-        self.used_names_in(workspace_root)
-            .iter()
-            .any(|entry| name_matches(pms, entry, id))
+    /// Is the package enabled by a `use` entry in this workspace?
+    pub async fn is_used_in(
+        &self,
+        pms: &PmRegistry,
+        id: &PackageId,
+        workspace_root: &Path,
+    ) -> bool {
+        names_match(pms, self.used_names_in(workspace_root).into_iter(), id)
+            .await
+            .unwrap_or(false)
     }
 
     /// Whether any enablement entry could pull in a crate plugin. With neither
@@ -195,8 +209,22 @@ impl PluginsConfig {
 /// Does a configured entry name the package `id`? `"*"` matches everything.
 /// An entry carries no package manager of its own, so the one owning `id`
 /// decides whether the two names are the same package.
-fn name_matches(pms: &PmRegistry, entry: &str, id: &PackageId) -> bool {
-    entry == "*" || pms.identity(&PackageId::any_version(&id.pm, entry)) == pms.identity(id)
+pub(crate) async fn names_match<'a>(
+    pms: &PmRegistry,
+    entries: impl Iterator<Item = &'a str>,
+    id: &PackageId,
+) -> anyhow::Result<bool> {
+    let mut names = vec![id.name.clone()];
+    for entry in entries {
+        if entry == "*" {
+            return Ok(true);
+        }
+        names.push(entry.to_string());
+    }
+    if names.len() == 1 {
+        return Ok(false);
+    }
+    pms.names_match(&id.pm, &names).await
 }
 
 /// One `[plugins] use` entry: a plugin name enabled deliberately, scoped
@@ -285,6 +313,7 @@ impl Default for Config {
             logging: LoggingConfig::default(),
             defaults: DefaultsConfig::default(),
             registries: Vec::new(),
+            package_managers: Vec::new(),
         }
     }
 }
@@ -314,11 +343,14 @@ struct RawConfig {
     defaults: DefaultsConfig,
     #[serde(default, rename = "registry")]
     registries: Vec<RegistryConfig>,
+    #[serde(default, rename = "package-manager")]
+    package_managers: Vec<PackageManagerConfig>,
 }
 
 impl RawConfig {
-    fn validate(self) -> Config {
-        Config {
+    fn validate(self) -> Result<Config, String> {
+        self.check_package_manager_names()?;
+        Ok(Config {
             auto_sync: self.auto_sync,
             agents_syncing: self.agents_syncing,
             sync_debounce_secs: self.sync_debounce_secs,
@@ -330,7 +362,53 @@ impl RawConfig {
             logging: self.logging,
             defaults: self.defaults,
             registries: self.registries,
+            package_managers: self.package_managers,
+        })
+    }
+
+    /// A `[[package-manager]]` name is what ids route by, what `[plugins]`
+    /// entries and `depends-on` atoms name, and a directory under the cache.
+    /// So it must be a plain identifier, and no other package manager or
+    /// registry may have it: the first would shadow the second silently.
+    /// `cargo` is allowed, since it replaces the built-in cargo instance.
+    fn check_package_manager_names(&self) -> Result<(), String> {
+        let mut builtin_registries = Vec::new();
+        if self.defaults.symposium_recommendations {
+            builtin_registries.push("symposium-recommendations");
         }
+        // Not a registry, but its name is in the revocation reports, so a
+        // package manager of that name would read as the list's issuer.
+        if self.defaults.symposium_audits {
+            builtin_registries.push(BUILTIN_AUDITS_LIST);
+        }
+        if self.defaults.user_plugins {
+            builtin_registries.push("user-plugins");
+        }
+        let mut seen: Vec<&str> = Vec::new();
+        for pm in &self.package_managers {
+            let name = pm.name.as_str();
+            if name.is_empty()
+                || !name
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+            {
+                return Err(format!(
+                    "`[[package-manager]]` name {name:?} must be letters, digits, `_` and `-`"
+                ));
+            }
+            let registry = builtin_registries
+                .iter()
+                .copied()
+                .chain(self.registries.iter().map(|r| r.name.as_str()))
+                .any(|r| r == name);
+            if registry || seen.contains(&name) {
+                return Err(format!(
+                    "`[[package-manager]]` name `{name}` is already taken by another package manager or registry"
+                ));
+            }
+            seen.push(name);
+        }
+        Ok(())
     }
 }
 
@@ -341,6 +419,12 @@ pub struct DefaultsConfig {
     #[serde(default = "default_true", rename = "symposium-recommendations")]
     pub symposium_recommendations: bool,
 
+    /// Include the `symposium-dev/audits` git source, the community list of
+    /// audited and revoked plugin payloads (default: false, until that
+    /// repository exists).
+    #[serde(default, rename = "symposium-audits")]
+    pub symposium_audits: bool,
+
     /// Include `~/.symposium/plugins/` as a local source (default: true).
     #[serde(default = "default_true", rename = "user-plugins")]
     pub user_plugins: bool,
@@ -350,6 +434,7 @@ impl Default for DefaultsConfig {
     fn default() -> Self {
         Self {
             symposium_recommendations: true,
+            symposium_audits: false,
             user_plugins: true,
         }
     }
@@ -377,6 +462,34 @@ pub struct RegistryConfig {
     pub auto_update: bool,
 }
 
+/// A `[[package-manager]]` entry: an ecosystem Symposium does not know natively,
+/// reached by running a binary that speaks the PM protocol.
+///
+/// This is the bootstrap channel for the PM layer. The cargo PM is built in;
+/// anything else (npm, pypi, a private ecosystem) arrives here. An entry
+/// named `cargo` *replaces* the built-in in-process instance, which is how you
+/// run even the cargo PM out of process.
+///
+/// A configured PM is an ecosystem transport, so its `active_plugins` are the
+/// plugins embedded in the workspace's dependencies. Those are **not** trusted,
+/// for the same reason cargo's aren't: depending on a package should not let
+/// its author inject agent context. Consent still applies.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PackageManagerConfig {
+    /// The ecosystem this PM owns: the `pm` component of every id it mints.
+    /// The PM must report the same name at `initialize`, or it is refused:
+    /// ids route by this name, so a mismatch would misroute silently.
+    pub name: String,
+
+    /// The binary to run. A bare name is resolved on `PATH`.
+    pub command: String,
+
+    /// Extra arguments, before the protocol takes over stdio.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Merged configuration view
 // ---------------------------------------------------------------------------
@@ -384,7 +497,16 @@ pub struct RegistryConfig {
 /// Cache subdirectory holding git registries' unpacked content.
 pub const REGISTRY_CACHE_SUBDIR: &str = "plugin-sources";
 
+pub const INSTALLED_PLUGINS_SUBDIR: &str = "installed";
+
 const BUILTIN_RECOMMENDATIONS_URL: &str = "https://github.com/symposium-dev/recommendations";
+
+pub(crate) const BUILTIN_AUDITS_URL: &str = "https://github.com/symposium-dev/audits";
+
+/// The name of the builtin community audits list, the only place
+/// [audits](crate::audits) are read from. It is a git repository read from
+/// its cache, not a registry: see [`Symposium::audits_dir`].
+pub const BUILTIN_AUDITS_LIST: &str = "symposium-audits";
 
 /// Full application context: parsed config + resolved directory paths.
 ///
@@ -396,6 +518,7 @@ pub struct Symposium {
     dirs: crate::dirs::SymposiumDirs,
     home_dir: PathBuf,
     env: EnvLookup,
+    agent_path: Option<PathBuf>,
 }
 
 type EnvLookup = Arc<dyn Fn(&str) -> Option<std::ffi::OsString> + Send + Sync>;
@@ -424,6 +547,7 @@ impl Symposium {
             dirs,
             home_dir,
             env: Arc::new(|name| env::var_os(name)),
+            agent_path: None,
         }
     }
 
@@ -451,6 +575,7 @@ impl Symposium {
             dirs,
             home_dir,
             env: Arc::new(|_| None),
+            agent_path: Some(root.join("bin")),
         }
     }
 
@@ -480,6 +605,14 @@ impl Symposium {
         }
     }
 
+    pub fn agent_command(&self, program: &str) -> tokio::process::Command {
+        let mut cmd = tokio::process::Command::new(program);
+        if let Some(path) = &self.agent_path {
+            cmd.env("PATH", path);
+        }
+        cmd
+    }
+
     /// Create an [`InstallContext`] for use with `symposium-install` functions.
     pub fn install_context(&self) -> symposium_install::InstallContext {
         let ctx = symposium_install::InstallContext::new(self.dirs.cache_dir.clone());
@@ -489,33 +622,78 @@ impl Symposium {
         }
     }
 
-    /// The active package-manager set: the fixed ecosystem transports plus one
-    /// [`PathPm`](crate::pm::PathPm) per configured registry
-    /// ([`registries`](Self::registries)) over its content directory —
-    /// including git registries, whose repository is unpacked into the cache
-    /// before it is read. Each instance is named for its registry, since that
-    /// name is what its plugins are attributed to.
+    /// The active package-manager set: the ecosystem transports (cargo, and
+    /// each `[[package-manager]]`), then one instance per configured registry
+    /// ([`registry_instances`](Self::registry_instances)), named for its
+    /// registry, since that name is what its plugins are attributed to.
+    ///
+    /// `cwd` is the directory a spawned PM is told it answers for: `None` for
+    /// a workspace-independent operation, so it does not go looking for one.
     pub fn package_managers(
         &self,
         workspace: &Arc<crate::pm::WorkspaceDeps>,
+        cwd: Option<&Path>,
     ) -> crate::pm::PmRegistry {
-        // The cargo transport first — over dependencies, so not a trust root.
-        let mut instances = vec![crate::pm::PmInstance::new(
-            crate::pm::CARGO_PM,
+        // The ecosystem transports, over dependencies, so not trust roots; then
+        // one registry instance per configured registry, trust roots. A
+        // `[[package-manager]]` named `cargo` replaces the built-in in-process
+        // instance, which is how the cargo PM is run out of process.
+        let configured = &self.config.package_managers;
+        let builtin_cargo =
+            (!configured.iter().any(|pm| pm.name == crate::pm::CARGO_PM)).then(|| {
+                crate::pm::PmInstance::new(
+                    crate::pm::CARGO_PM,
+                    false,
+                    crate::pm::PluginKind::Package,
+                    Box::new(crate::pm::CargoPm::new(Arc::clone(workspace))),
+                )
+            });
+        let instances = builtin_cargo
+            .into_iter()
+            .chain(
+                configured
+                    .iter()
+                    .map(|pm| self.configured_pm_instance(pm, cwd)),
+            )
+            .chain(self.registry_instances());
+        crate::pm::PmRegistry::new(instances.collect())
+    }
+
+    /// A `[[package-manager]]` entry as a spawned instance.
+    ///
+    /// The process is not started here: [`RemotePm`](crate::pm::RemotePm)
+    /// spawns lazily, so a configured PM that nothing asks about costs nothing.
+    fn configured_pm_instance(
+        &self,
+        pm: &PackageManagerConfig,
+        cwd: Option<&Path>,
+    ) -> crate::pm::PmInstance {
+        let mut command = crate::pm::RemotePmCommand::new(&pm.command)
+            .workspace(cwd.map(Path::to_path_buf))
+            .cache_dir(self.dirs.cache_dir.join("pm").join(&pm.name));
+        for arg in &pm.args {
+            command = command.arg(arg);
+        }
+        // The cargo binary override is the test harness's channel to a fake
+        // cargo. It comes from Symposium's directories rather than its process
+        // environment, so inheriting the environment would not carry it.
+        if let Some(cargo) = &self.dirs.cargo_override {
+            command = command.env("SYMPOSIUM_CARGO", cargo.display().to_string());
+        }
+
+        crate::pm::PmInstance::new(
+            &pm.name,
             false,
             crate::pm::PluginKind::Package,
-            Box::new(crate::pm::CargoPm::new(Arc::clone(workspace))),
-        )];
-        // One registry instance per configured registry — trust roots.
-        instances.extend(self.registry_instances());
-        crate::pm::PmRegistry::new(instances)
+            Box::new(crate::pm::RemotePm::new(&pm.name, command)),
+        )
     }
 
     /// The package managers for a workspace-independent operation (registry
     /// listing, crates.io search): the cargo transport is built over a detached
     /// resolver that never runs `cargo metadata`.
     pub fn detached_managers(&self) -> crate::pm::PmRegistry {
-        self.package_managers(&Arc::new(crate::pm::WorkspaceDeps::detached()))
+        self.package_managers(&Arc::new(crate::pm::WorkspaceDeps::detached()), None)
     }
 
     /// The workspace context for `cwd`: the package managers plus where the
@@ -527,7 +705,7 @@ impl Symposium {
     pub fn workspace(&self, dir: &Path) -> Arc<crate::pm::Workspace> {
         Arc::new(crate::pm::Workspace::new(
             Some(dir.to_path_buf()),
-            self.package_managers(&self.workspace_deps(dir)),
+            self.package_managers(&self.workspace_deps(dir), Some(dir)),
         ))
     }
 
@@ -622,7 +800,8 @@ impl Symposium {
     /// — so refreshing (pulling git content) is the PM's own concern rather than
     /// a separate step. A registry whose source can't be resolved (a malformed
     /// git URL, or an entry naming neither `git` nor `path`) is skipped with a
-    /// warning.
+    /// warning. The builtin audits list is not among them: it is no trust root
+    /// and offers no plugins (see [`Symposium::audits_dir`]).
     pub fn registry_instances(&self) -> Vec<crate::pm::PmInstance> {
         let mut configs: Vec<RegistryConfig> = Vec::new();
 
@@ -658,12 +837,7 @@ impl Symposium {
     fn registry_instance(&self, cfg: RegistryConfig) -> Option<crate::pm::PmInstance> {
         let name = cfg.name.clone();
         let (pm, source): (Box<dyn crate::pm::PackageManager>, _) = if let Some(url) = &cfg.git {
-            match crate::pm::GitPm::new(
-                name.clone(),
-                url.clone(),
-                cfg.auto_update,
-                self.install_context(),
-            ) {
+            match crate::pm::GitPm::new(name.clone(), url.clone(), self.install_context()) {
                 Some(git) => {
                     let source = git.source();
                     (Box::new(git), source)
@@ -687,10 +861,26 @@ impl Symposium {
             tracing::warn!(registry = %name, "registry names neither git nor path");
             return None;
         };
-        Some(
+        let mut instance =
             crate::pm::PmInstance::new(name, true, crate::pm::PluginKind::Registry, pm)
-                .with_source(source),
-        )
+                .with_source(source);
+        instance.auto_update = cfg.auto_update;
+        Some(instance)
+    }
+
+    /// Where the builtin `symposium-audits` list is cached, whether or not it
+    /// has been fetched: the one directory [audits](crate::audits) are read
+    /// from. `None` while the list is off. The list shares the git registries'
+    /// cache, but it is no registry: nothing in it loads as a plugin, and a
+    /// list that was never fetched is no list (every lookup answers "not
+    /// audited"), not an unreadable source. [`crate::audits::refresh_audits`]
+    /// fetches it.
+    pub fn audits_dir(&self) -> Option<PathBuf> {
+        if !self.config.defaults.symposium_audits {
+            return None;
+        }
+        symposium_install::git::GitCacheManager::new(&self.install_context(), REGISTRY_CACHE_SUBDIR)
+            .cache_path_for_url(BUILTIN_AUDITS_URL)
     }
 
     pub fn config_error(&self) -> Option<&str> {
@@ -759,7 +949,10 @@ fn load_config_from(config_dir: &Path) -> (Config, Option<String>) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Config::default(), None),
         Err(e) => e.to_string(),
         Ok(contents) => match toml::from_str::<RawConfig>(&contents) {
-            Ok(raw) => return (raw.validate(), None),
+            Ok(raw) => match raw.validate() {
+                Ok(config) => return (config, None),
+                Err(e) => e,
+            },
             Err(e) => e.to_string(),
         },
     };
@@ -792,13 +985,17 @@ mod tests {
     use indoc::indoc;
 
     fn parse_config(toml: &str) -> Config {
-        toml::from_str::<RawConfig>(toml).unwrap().validate()
+        toml::from_str::<RawConfig>(toml)
+            .unwrap()
+            .validate()
+            .unwrap()
     }
 
     #[test]
     fn parse_empty_config() {
         let config = parse_config("");
         assert!(config.defaults.symposium_recommendations);
+        assert!(!config.defaults.symposium_audits);
         assert!(config.defaults.user_plugins);
         assert!(config.registries.is_empty());
     }
@@ -811,6 +1008,30 @@ mod tests {
         "});
         assert!(!config.defaults.symposium_recommendations);
         assert!(config.defaults.user_plugins);
+    }
+
+    /// The audits list is the one place audits are read from. It is off until
+    /// the community list exists, and turns on by name; on or off, it is no
+    /// registry instance.
+    #[test]
+    fn builtin_audits_list_follows_its_default_and_is_no_registry() {
+        let sym = |config: &str| {
+            let tmp = tempfile::tempdir().unwrap();
+            std::fs::write(tmp.path().join("config.toml"), config).unwrap();
+            (Symposium::from_dir(tmp.path()), tmp)
+        };
+        let names = |sym: &Symposium| {
+            sym.registry_instances()
+                .into_iter()
+                .map(|inst| inst.name)
+                .collect::<Vec<_>>()
+        };
+        let (off, _tmp) = sym("");
+        assert_eq!(names(&off), ["symposium-recommendations"]);
+        assert_eq!(off.audits_dir(), None);
+        let (on, _tmp) = sym("[defaults]\nsymposium-audits = true\n");
+        assert_eq!(names(&on), ["symposium-recommendations"]);
+        assert!(on.audits_dir().unwrap().starts_with(on.cache_dir()));
     }
 
     #[test]
@@ -1074,8 +1295,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn parse_plugins_enablement() {
+    #[tokio::test]
+    async fn parse_plugins_enablement() {
         let config = parse_config(indoc! {r#"
             [plugins]
             auto-enable = ["widget-lib"]
@@ -1086,9 +1307,19 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let pms = Symposium::from_dir(tmp.path()).detached_managers();
         let krate = |name| PackageId::new(crate::pm::CARGO_PM, name, "1.0.0");
-        assert!(config.plugins.is_auto_enabled(&pms, &krate("widget_lib")));
-        assert!(!config.plugins.is_auto_enabled(&pms, &krate("other")));
-        assert!(config.plugins.is_disabled(&pms, &krate("noisy-crate")));
+        assert!(
+            config
+                .plugins
+                .is_auto_enabled(&pms, &krate("widget_lib"))
+                .await
+        );
+        assert!(!config.plugins.is_auto_enabled(&pms, &krate("other")).await);
+        assert!(
+            config
+                .plugins
+                .is_disabled(&pms, &krate("noisy-crate"))
+                .await
+        );
 
         assert_eq!(
             config.plugins.used,
@@ -1112,11 +1343,13 @@ mod tests {
             config
                 .plugins
                 .is_used_in(&pms, &krate("scoped"), Path::new("/ws/a"))
+                .await
         );
         assert!(
             !config
                 .plugins
                 .is_used_in(&pms, &krate("scoped"), Path::new("/ws/other"))
+                .await
         );
 
         // Entries survive a round trip through the config file.
@@ -1124,8 +1357,8 @@ mod tests {
         assert_eq!(reparsed.plugins, config.plugins);
     }
 
-    #[test]
-    fn auto_enable_wildcard_matches_every_name() {
+    #[tokio::test]
+    async fn auto_enable_wildcard_matches_every_name() {
         let config = parse_config(indoc! {r#"
             [plugins]
             auto-enable = ["*"]
@@ -1136,13 +1369,14 @@ mod tests {
             config
                 .plugins
                 .is_auto_enabled(&pms, &PackageId::any_version("anything", "anything"))
+                .await
         );
     }
 
     /// An entry names a package the way that package's manager compares
     /// names: cargo folds `-` and `_`, a registry compares exactly.
-    #[test]
-    fn plugins_entries_match_under_the_owning_package_manager() {
+    #[tokio::test]
+    async fn plugins_entries_match_under_the_owning_package_manager() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(
             tmp.path().join("config.toml"),
@@ -1164,14 +1398,26 @@ mod tests {
         let krate = |name| PackageId::new(crate::pm::CARGO_PM, name, "1.0.0");
         let plugin = |name| PackageId::any_version("reg", name);
 
-        assert!(plugins.is_auto_enabled(&pms, &krate("widget-lib")));
-        assert!(plugins.is_disabled(&pms, &krate("noisy-crate")));
-        assert!(plugins.is_used_in(&pms, &krate("serde-json"), tmp.path()));
+        assert!(plugins.is_auto_enabled(&pms, &krate("widget-lib")).await);
+        assert!(plugins.is_disabled(&pms, &krate("noisy-crate")).await);
+        assert!(
+            plugins
+                .is_used_in(&pms, &krate("serde-json"), tmp.path())
+                .await
+        );
 
-        assert!(plugins.is_disabled(&pms, &plugin("my_plugin")));
-        assert!(plugins.is_used_in(&pms, &plugin("my_plugin"), tmp.path()));
-        assert!(!plugins.is_disabled(&pms, &plugin("my-plugin")));
-        assert!(!plugins.is_used_in(&pms, &plugin("my-plugin"), tmp.path()));
+        assert!(plugins.is_disabled(&pms, &plugin("my_plugin")).await);
+        assert!(
+            plugins
+                .is_used_in(&pms, &plugin("my_plugin"), tmp.path())
+                .await
+        );
+        assert!(!plugins.is_disabled(&pms, &plugin("my-plugin")).await);
+        assert!(
+            !plugins
+                .is_used_in(&pms, &plugin("my-plugin"), tmp.path())
+                .await
+        );
     }
 
     #[test]
@@ -1203,5 +1449,54 @@ mod tests {
         }
 
         assert_eq!(result, xdg_state.join("symposium").join("logs"));
+    }
+
+    /// Ids route by name, so a configured package manager cannot take a name
+    /// another package manager or a registry has, and the name must be a plain
+    /// identifier. Such a config is an error, as an unparseable one is, rather
+    /// than one entry silently shadowing another.
+    #[test]
+    fn a_package_manager_name_must_be_free_and_plain() {
+        let check = |toml: &str| {
+            toml::from_str::<RawConfig>(toml)
+                .unwrap()
+                .validate()
+                .map(|_| ())
+        };
+        let pm = |name: &str| format!("[[package-manager]]\nname = {name:?}\ncommand = \"x\"\n");
+
+        assert!(check(&format!("{}{}", pm("npm"), pm("pypi"))).is_ok());
+        assert!(check(&pm("cargo")).is_ok(), "replaces the built-in cargo");
+        assert!(check(&format!("{}{}", pm("npm"), pm("npm"))).is_err());
+        assert!(check(&pm("user-plugins")).is_err());
+        assert!(
+            check(&format!(
+                "[defaults]\nsymposium-audits = true\n{}",
+                pm("symposium-audits")
+            ))
+            .is_err()
+        );
+        assert!(
+            check(&format!(
+                "[[registry]]\nname = \"mine\"\npath = \"mine\"\n{}",
+                pm("mine")
+            ))
+            .is_err()
+        );
+        assert!(
+            check(&format!(
+                "[defaults]\nuser-plugins = false\n{}",
+                pm("user-plugins")
+            ))
+            .is_ok()
+        );
+        for bad in ["", "../x", "/abs", "a:b"] {
+            assert!(check(&pm(bad)).is_err(), "{bad:?}");
+        }
+        assert!(
+            toml::from_str::<RawConfig>("[[package-manager]]\nname = \"npm\"\ncomand = \"x\"\n")
+                .is_err(),
+            "a misspelled key is an error, not ignored"
+        );
     }
 }

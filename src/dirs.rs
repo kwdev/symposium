@@ -56,7 +56,13 @@ impl SymposiumDirs {
     /// Create a [`WorkspaceDeps`] with disk caching enabled and the
     /// correct cargo override.
     pub fn workspace_deps(&self, cwd: &Path) -> WorkspaceDeps {
-        WorkspaceDeps::new(cwd, self)
+        WorkspaceDeps::new(
+            cwd,
+            symposium_pm_cargo::CargoPmConfig {
+                cache_dir: Some(self.cache_dir.clone()),
+                cargo: self.cargo_override.clone(),
+            },
+        )
     }
 }
 
@@ -70,8 +76,12 @@ pub(crate) fn xdg_dir(name: &str) -> Option<PathBuf> {
     env_dir(name).filter(|path| path.is_absolute())
 }
 
+fn symposium_home() -> Option<PathBuf> {
+    env_dir("SYMPOSIUM_HOME").map(|home| std::path::absolute(&home).unwrap_or(home))
+}
+
 fn resolve_config_dir() -> PathBuf {
-    if let Some(home) = env_dir("SYMPOSIUM_HOME") {
+    if let Some(home) = symposium_home() {
         home
     } else if let Some(xdg) = xdg_dir("XDG_CONFIG_HOME") {
         xdg.join("symposium")
@@ -83,7 +93,7 @@ fn resolve_config_dir() -> PathBuf {
 }
 
 fn resolve_cache_dir(config_dir: &Path) -> PathBuf {
-    if let Some(home) = env_dir("SYMPOSIUM_HOME") {
+    if let Some(home) = symposium_home() {
         return home.join("cache");
     }
     if let Some(xdg) = xdg_dir("XDG_CACHE_HOME") {

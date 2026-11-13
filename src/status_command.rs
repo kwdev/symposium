@@ -5,7 +5,7 @@
 //! per plugin, each naming its enablement root — so it answers "why is
 //! serde-skills here?" with "enabled via serde".
 //!
-//! Four states, matching the axis:
+//! Five states, matching the axis:
 //!
 //! - **active** — enabled and its predicates hold for this workspace. The
 //!   root names the trust root: workspace membership, a configured registry,
@@ -19,6 +19,16 @@
 //!   asks about.
 //! - **declined** — recorded in `[plugins] disable`, the record of pruned
 //!   nodes and declined discoveries.
+//! - **revoked** — the [audits list](crate::audits) revokes this release or
+//!   payload, for the stated reason. It is not loaded, whatever `use` or
+//!   `auto-enable` say; only `disable` outranks it, in which case the plugin
+//!   shows as declined.
+//!
+//! A dependency plugin's line also says what the audits list says about it —
+//! audited, or not audited (and, when the list audits the package but this
+//! payload cannot be digested, why) — in the same words as the consent
+//! prompt and the `SessionStart` hint. An audit changes nothing about what
+//! loads.
 
 use std::path::Path;
 
@@ -27,6 +37,7 @@ use anyhow::Result;
 use std::sync::Arc;
 use symposium_install::UpdateLevel;
 
+use crate::audits::{Answer, AuditIndex, Verdict};
 use crate::config::Symposium;
 use crate::discovery::{DiscoveredPlugin, Enablement};
 use crate::report::ReportEvent;
@@ -42,6 +53,8 @@ pub enum StatusState {
     Candidate,
     /// Declined, via `[plugins] disable`.
     Declined,
+    /// Revoked by the audits list.
+    Revoked,
 }
 
 impl StatusState {
@@ -52,6 +65,7 @@ impl StatusState {
             Self::Dormant => "dormant",
             Self::Candidate => "candidate",
             Self::Declined => "declined",
+            Self::Revoked => "revoked",
         }
     }
 }
@@ -60,13 +74,18 @@ impl StatusState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusEntry {
     pub name: String,
-    /// Resolved version for a discovered dependency plugin; `None` for
-    /// manifest plugins, whose identity is their source, not a version.
     pub version: Option<String>,
     /// The enablement root, or — for the states that don't have one — why
     /// the plugin will not load.
     pub root: String,
     pub state: StatusState,
+    pub format: Option<&'static str>,
+    /// What the audits list says about a dependency plugin; `None` when no
+    /// list was read, when it is revoked (a revoked line's root says so, a
+    /// declined one stays declined) or not looked up: a trust root's plugin,
+    /// a `use`d crate that is not cached yet or a dependency that offers no
+    /// plugin, and a declined name discovery never saw.
+    pub audit: Option<Verdict>,
 }
 
 /// Compute the enablement report for the workspace `deps` points at.
@@ -84,7 +103,7 @@ pub async fn workspace_status(
     let registry = crate::plugins::load_registry_with_workspace(sym, Some(&ws)).await;
     let dep_ids = workspace.dep_ids().await.to_vec();
     let pms = workspace.pms();
-    let used = crate::discovery::used_plugins(sym, pms, &registry.plugins, &ws.root);
+    let used = crate::discovery::used_plugins(sym, pms, &registry.plugins, &ws.root).await;
     let mut ctx = crate::predicate::PredicateContext::new(&dep_ids).with_used(&used);
     for parsed in &registry.plugins {
         let root = if parsed.workspace_member {
@@ -97,7 +116,8 @@ pub async fn workspace_status(
         let active = parsed.applies(&mut ctx);
         entries.push(StatusEntry {
             name: parsed.manifest.name.clone(),
-            version: None,
+            version: parsed.manifest.version.clone(),
+            format: parsed.format(),
             root: if active || !parsed.manifest.requires_use {
                 root
             } else {
@@ -108,6 +128,7 @@ pub async fn workspace_status(
             } else {
                 StatusState::Dormant
             },
+            audit: None,
         });
     }
 
@@ -120,6 +141,7 @@ pub async fn workspace_status(
         .chain(&discovery.auto_enabled)
         .chain(&discovery.candidates)
         .chain(&discovery.declined)
+        .chain(&discovery.revoked)
     {
         entries.push(entry_for(found));
     }
@@ -129,20 +151,27 @@ pub async fn workspace_status(
     // Discovery only sees dependencies, so these are invisible above; surface
     // them from the config the same way sync loads them
     // ([`enabled_dependencies`](crate::discovery::enabled_dependencies)).
-    let shown: std::collections::HashSet<crate::pm::PackageId> = registry
-        .plugins
-        .iter()
-        .map(|p| pms.identity(&p.canonical))
-        .chain(
-            discovery
-                .active
-                .iter()
-                .chain(&discovery.auto_enabled)
-                .chain(&discovery.candidates)
-                .chain(&discovery.declined)
-                .map(|d| pms.identity(&d.id)),
-        )
-        .collect();
+    let mut shown = std::collections::HashSet::new();
+    for id in registry.plugins.iter().map(|p| &p.canonical).chain(
+        discovery
+            .active
+            .iter()
+            .chain(&discovery.auto_enabled)
+            .chain(&discovery.candidates)
+            .chain(&discovery.declined)
+            .chain(&discovery.revoked)
+            .map(|d| &d.id),
+    ) {
+        if let Ok(id) = pms.identity(id).await {
+            shown.insert(id);
+        }
+    }
+    let mut dependency_ids = std::collections::HashSet::new();
+    for id in &dep_ids {
+        if let Ok(id) = pms.identity(id).await {
+            dependency_ids.insert(id);
+        }
+    }
     let enabled = crate::discovery::enabled_dependencies(
         sym,
         pms,
@@ -156,15 +185,38 @@ pub async fn workspace_status(
         crate::discovery::resolve_used(sym, pms, &registry.plugins, &ws.root, UpdateLevel::None)
             .await;
     for id in enabled {
-        if shown.contains(&pms.identity(&id)) {
+        let Ok(identity) = pms.identity(&id).await else {
+            continue;
+        };
+        if shown.contains(&identity) {
             continue;
         }
-        let dependency = dep_ids
-            .iter()
-            .any(|dep| pms.identity(dep) == pms.identity(&id));
-        let named = used.iter().any(|(_, used)| *used == pms.identity(&id));
+        let dependency = dependency_ids.contains(&identity);
+        let named = used.iter().any(|(_, used)| *used == identity);
         if dependency && !named {
             continue;
+        }
+        // A `use`d crate the workspace does not depend on is loaded from
+        // cargo's cache, so its release is known without fetching: the audits
+        // apply to it like to any other dependency plugin.
+        let mut audit = None;
+        if !dependency && let Ok(fetched) = pms.fetch(&id, UpdateLevel::None).await {
+            let audits = AuditIndex::configured(sym);
+            match audits.answer(pms, &fetched.id).await {
+                Answer::Revoked(revocation) => {
+                    entries.push(StatusEntry {
+                        name: id.name,
+                        version: Some(fetched.id.version),
+                        root: revocation.to_string(),
+                        state: StatusState::Revoked,
+                        format: None,
+                        audit: None,
+                    });
+                    continue;
+                }
+                // As for discovered plugins: no verdict without a list read.
+                Answer::Verdict(verdict) => audit = audits.is_read().then_some(verdict),
+            }
         }
         entries.push(StatusEntry {
             name: id.name,
@@ -180,6 +232,8 @@ pub async fn workspace_status(
             } else {
                 StatusState::Active
             },
+            format: None,
+            audit,
         });
     }
     let mut missing = std::collections::HashSet::new();
@@ -198,17 +252,20 @@ pub async fn workspace_status(
             root: "`[plugins] use` (not a registry plugin, a dependency or a cached crate)"
                 .to_string(),
             state: StatusState::Dormant,
+            format: None,
+            audit: None,
         });
     }
 
     // Names declined without ever being discovered (a `disable` entry for a
     // dependency whose source isn't on disk, or one added by hand). A name no
     // package manager has can only be compared as written.
-    let mut declined: std::collections::HashSet<crate::pm::PackageId> = discovery
-        .declined
-        .iter()
-        .map(|d| pms.identity(&d.id))
-        .collect();
+    let mut declined = std::collections::HashSet::new();
+    for offer in &discovery.declined {
+        if let Ok(id) = pms.identity(&offer.id).await {
+            declined.insert(id);
+        }
+    }
     let mut unknown = std::collections::HashSet::new();
     for name in &sym.config.plugins.disable {
         if name == "*" {
@@ -229,21 +286,25 @@ pub async fn workspace_status(
             version: None,
             root: "declined (`[plugins] disable`)".to_string(),
             state: StatusState::Declined,
+            format: None,
+            audit: None,
         });
     }
 
     Ok(entries)
 }
 
-/// Render one discovered dependency plugin as a status line.
+/// Render one discovered dependency plugin as a status line, with the verdict
+/// discovery looked up (none for a revoked offer, declined or not).
 fn entry_for(found: &DiscoveredPlugin) -> StatusEntry {
-    let (state, root) = match found.enablement {
+    let (state, root) = match &found.enablement {
         Enablement::Used => (StatusState::Active, "`[plugins] use`".to_string()),
         Enablement::AutoEnabled => (StatusState::Active, "`[plugins] auto-enable`".to_string()),
         Enablement::Declined => (
             StatusState::Declined,
             "declined (`[plugins] disable`)".to_string(),
         ),
+        Enablement::Revoked(revocation) => (StatusState::Revoked, revocation.to_string()),
         Enablement::Candidate => (
             StatusState::Candidate,
             format!(
@@ -258,6 +319,8 @@ fn entry_for(found: &DiscoveredPlugin) -> StatusEntry {
         version: Some(found.id.version.clone()),
         root,
         state,
+        format: found.format,
+        audit: found.audit.clone(),
     }
 }
 
@@ -280,6 +343,8 @@ pub async fn status(sym: &Symposium, cwd: &Path) -> Result<()> {
                 version: entry.version,
                 root: entry.root,
                 state: entry.state.as_str().to_string(),
+                format: entry.format.map(str::to_string),
+                audit: entry.audit.as_ref().map(Verdict::to_string),
             },
         );
     }

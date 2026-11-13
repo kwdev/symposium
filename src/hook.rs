@@ -1,8 +1,10 @@
 use crate::predicate::PredicateEval;
 use std::{
-    io::{Read, Write},
+    fs::File,
+    io::{Read, Seek, Write},
     path::{Path, PathBuf},
-    process::{Command, ExitCode, Stdio},
+    process::{Command, ExitCode, Output, Stdio},
+    time::{Duration, Instant},
 };
 
 use symposium_install::Runnable;
@@ -40,6 +42,7 @@ struct ResolvedHook {
     /// Hook-level `script` override.
     hook_script: Option<String>,
     args: Vec<String>,
+    plugin_root: PathBuf,
 }
 
 impl ResolvedHook {
@@ -68,6 +71,7 @@ impl ResolvedHook {
             hook_executable: hook.executable.clone(),
             hook_script: hook.script.clone(),
             args: hook.args.clone(),
+            plugin_root: parsed_plugin.root.clone(),
         })
     }
 }
@@ -148,7 +152,11 @@ enum SpawnSpec {
     },
 }
 
-async fn build_spawn_spec(sym: &Symposium, hook: &ResolvedHook) -> anyhow::Result<SpawnSpec> {
+async fn build_spawn_spec(
+    sym: &Symposium,
+    hook: &ResolvedHook,
+    deadline: Instant,
+) -> anyhow::Result<SpawnSpec> {
     // Dispatch-time acquisition serves the cache (git checks debounced); the
     // `SessionStart` prewarm is what forces a freshness check once per session.
     let update = symposium_install::UpdateLevel::None;
@@ -156,7 +164,7 @@ async fn build_spawn_spec(sym: &Symposium, hook: &ResolvedHook) -> anyhow::Resul
     // Acquire requirements first so the command's PATH sees them.
     let mut acquired: Vec<AcquiredInstallation> = Vec::new();
     for requirement in &hook.requirements {
-        match acquire_installation(sym, requirement, None, None, update).await {
+        match acquire_installation(sym, requirement, None, None, update, Some(deadline)).await {
             Ok(a) => acquired.push(a),
             Err(e) => {
                 tracing::error!(
@@ -174,11 +182,18 @@ async fn build_spawn_spec(sym: &Symposium, hook: &ResolvedHook) -> anyhow::Resul
         hook.hook_executable.as_deref(),
         hook.hook_script.as_deref(),
         update,
+        Some(deadline),
     )
     .await?;
 
     acquired.push(command_acquired.clone());
-    let env = build_env(&acquired);
+    let mut env = build_env(&acquired);
+    if hook.format == HookFormat::Claude {
+        env.push((
+            "CLAUDE_PLUGIN_ROOT".to_string(),
+            hook.plugin_root.display().to_string(),
+        ));
+    }
 
     let label = format!("hook `{}`", hook.hook_name);
     let runnable = resolve_runnable(command_acquired, &label)?;
@@ -197,31 +212,89 @@ async fn build_spawn_spec(sym: &Symposium, hook: &ResolvedHook) -> anyhow::Resul
     })
 }
 
-fn spawn_from_spec(spec: SpawnSpec) -> std::io::Result<std::process::Child> {
+fn spawn_from_spec(
+    spec: SpawnSpec,
+    dir: Option<&Path>,
+    stdout: &File,
+    stderr: &File,
+) -> std::io::Result<std::process::Child> {
     match spec {
         SpawnSpec::Script { path, args, env } => {
             let mut cmd = Command::new("sh");
             cmd.arg(path).args(args);
+            if let Some(dir) = dir {
+                cmd.current_dir(dir);
+            }
             for (k, v) in env {
                 cmd.env(k, v);
             }
+            symposium_install::process_tree::own_group(&mut cmd);
             cmd.stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
+                .stdout(stdout.try_clone()?)
+                .stderr(stderr.try_clone()?)
                 .spawn()
         }
         SpawnSpec::Exec { path, args, env } => {
             let mut cmd = Command::new(path);
             cmd.args(args);
+            if let Some(dir) = dir {
+                cmd.current_dir(dir);
+            }
             for (k, v) in env {
                 cmd.env(k, v);
             }
+            symposium_install::process_tree::own_group(&mut cmd);
             cmd.stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
+                .stdout(stdout.try_clone()?)
+                .stderr(stderr.try_clone()?)
                 .spawn()
         }
     }
+}
+
+const PLUGIN_HOOK_TIMEOUT: Duration = Duration::from_secs(5);
+const PLUGIN_HOOKS_BUDGET: Duration = Duration::from_secs(8);
+
+/// Returns `None` when the hook was killed at `deadline`. Output goes to files,
+/// not pipes, so neither a full pipe nor a background job can hold dispatch.
+fn run_with_deadline(
+    spec: SpawnSpec,
+    dir: Option<&Path>,
+    input: Vec<u8>,
+    deadline: Instant,
+) -> std::io::Result<Option<Output>> {
+    let stdout = tempfile::tempfile()?;
+    let stderr = tempfile::tempfile()?;
+    let mut child = spawn_from_spec(spec, dir, &stdout, &stderr)?;
+    if let Some(mut stdin) = child.stdin.take() {
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(&input);
+        });
+    }
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            symposium_install::process_tree::kill(child.id());
+            let _ = child.kill();
+            child.wait()?;
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    Ok(Some(Output {
+        status,
+        stdout: read_from_start(stdout)?,
+        stderr: read_from_start(stderr)?,
+    }))
+}
+
+fn read_from_start(mut file: File) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    file.rewind()?;
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 // Re-export hook schema types for convenience.
@@ -231,6 +304,15 @@ pub use crate::hook_schema::{HookAgent, HookEvent, HookResponse};
 /// Takes the raw agent wire-format input, returns the agent wire-format
 /// response. Called by both `run()` (CLI) and the test harness.
 pub async fn execute_hook(
+    sym: &Symposium,
+    agent: HookAgent,
+    event: HookEvent,
+    input: &str,
+) -> anyhow::Result<HookResponse> {
+    crate::pm::remote::with_hook_budget(execute_hook_inner(sym, agent, event, input)).await
+}
+
+async fn execute_hook_inner(
     sym: &Symposium,
     agent: HookAgent,
     event: HookEvent,
@@ -269,7 +351,8 @@ pub async fn execute_hook(
         // Auto-sync: install applicable skills into agent dirs (non-fatal).
         // SessionStart refreshes source caches and syncs unconditionally.
         let session_start = event == HookEvent::SessionStart;
-        let notify_about_possible_new_plugins = run_auto_sync(sym, &deps, session_start).await;
+        let (notify_about_possible_new_plugins, plugin_changes) =
+            run_auto_sync(sym, &deps, session_start).await;
 
         // SessionStart (once per session) also refreshes every hook's already-
         // cached source, so later events dispatch fresh binaries without per-
@@ -279,8 +362,14 @@ pub async fn execute_hook(
         }
 
         // Builtin dispatch → symposium output → host agent output as Value
-        let builtin_sym_output =
-            dispatch_builtin(sym, &sym_input, &deps, notify_about_possible_new_plugins).await;
+        let builtin_sym_output = dispatch_builtin(
+            sym,
+            &sym_input,
+            &deps,
+            notify_about_possible_new_plugins,
+            plugin_reload_notice(agent, plugin_changes),
+        )
+        .await;
         let builtin_agent_output = handler.translate_output(&builtin_sym_output);
         let prior_output = builtin_agent_output.to_hook_output();
 
@@ -422,25 +511,34 @@ fn write_hook_trace(agent: HookAgent, event: HookEvent, input: &str, response: &
 /// the freshness gate, so upstream skill changes land even when the
 /// workspace's dependencies are unchanged.
 ///
-/// Returns whether it re-synced mid-session because an input changed.
-async fn run_auto_sync(sym: &Symposium, deps: &Arc<Workspace>, session_start: bool) -> bool {
+/// Returns whether it re-synced mid-session because an input changed, and
+/// the plugins the sync installed or updated for each agent that takes them.
+async fn run_auto_sync(
+    sym: &Symposium,
+    deps: &Arc<Workspace>,
+    session_start: bool,
+) -> (bool, Vec<(crate::agents::Agent, Vec<String>)>) {
     if !sym.config.auto_sync {
         tracing::debug!("auto-sync disabled, skipping");
-        return false;
+        return (false, Vec::new());
     }
     let Some(start) = deps.start().map(Path::to_path_buf) else {
-        return false;
+        return (false, Vec::new());
     };
 
     let mut state = crate::workspace_state::WorkspaceState::load(sym, &start);
     if !session_start && let Some((workspace, dep_ids)) = state.fresh() {
         tracing::debug!("auto-sync skipped: no package manager input changed since last sync");
         deps.reuse(workspace, dep_ids);
-        return false;
+        return (false, Vec::new());
     }
+    let inputs_changed = state
+        .last_sync
+        .as_ref()
+        .is_some_and(|last| !last.inputs.is_empty());
     if deps.info().await.is_none() {
         tracing::debug!("auto-sync skipped: not in a workspace");
-        return false;
+        return (false, Vec::new());
     }
 
     let update = if session_start {
@@ -450,16 +548,42 @@ async fn run_auto_sync(sym: &Symposium, deps: &Arc<Workspace>, session_start: bo
     };
 
     tracing::debug!("auto-sync running");
-    if let Err(e) = crate::sync::sync(sym, deps, update).await {
-        tracing::warn!(error = %e, "auto-sync during hook failed (continuing)");
-        return false;
-    }
+    let plugin_changes = match crate::sync::sync(sym, deps, update).await {
+        Ok(plugin_changes) => plugin_changes,
+        Err(e) => {
+            tracing::warn!(error = %e, "auto-sync during hook failed (continuing)");
+            return (false, Vec::new());
+        }
+    };
 
     if let Some(workspace) = deps.info().await {
         state.record_sync(workspace, deps.dep_ids().await);
         state.save(sym, &start);
     }
-    !session_start
+    (!session_start && inputs_changed, plugin_changes)
+}
+
+fn plugin_reload_notice(
+    agent: HookAgent,
+    plugin_changes: Vec<(crate::agents::Agent, Vec<String>)>,
+) -> Option<String> {
+    let load_now = match agent {
+        HookAgent::Claude => "Tell the user to run `/reload-plugins` to load them now.",
+        HookAgent::Antigravity => "Tell the user to run `/skills reload` to load them now.",
+        HookAgent::Codex => "Tell the user to start a new session to load them.",
+        HookAgent::Copilot => "Tell the user to run `/restart` to load them now.",
+        HookAgent::Goose | HookAgent::Kiro | HookAgent::OpenCode => return None,
+    };
+    let (_, updated) = plugin_changes
+        .into_iter()
+        .find(|(changed_for, _)| changed_for.config_name() == agent.as_str())?;
+    (!updated.is_empty()).then(|| {
+        format!(
+            "Symposium installed or updated these plugins after this session started, \
+             so they are not loaded yet: {}. {load_now}",
+            updated.join(", ")
+        )
+    })
 }
 
 /// Whether the hook pipeline must resolve the workspace crate graph before
@@ -499,11 +623,13 @@ async fn prewarm_hook_sources(sym: &Symposium, deps: &Arc<Workspace>) {
         Vec::new()
     };
     let pms = deps.pms();
-    let used = workspace
-        .as_ref()
-        .map(|ws| crate::discovery::used_plugins(sym, pms, &registry.plugins, &ws.root))
-        .unwrap_or_default();
-    let mut ctx = crate::predicate::PredicateContext::new(&dep_ids).with_used(&used);
+    let used = match &workspace {
+        Some(ws) => crate::discovery::used_plugins(sym, pms, &registry.plugins, &ws.root).await,
+        None => Vec::new(),
+    };
+    let mut ctx = crate::predicate::PredicateContext::new(&dep_ids)
+        .with_used(&used)
+        .with_cwd(deps.start());
     let plugins = crate::plugins::active_plugins(
         sym,
         &registry,
@@ -553,19 +679,34 @@ pub async fn dispatch_builtin(
     input: &symposium::InputEvent,
     deps: &Arc<Workspace>,
     notify_about_possible_new_plugins: bool,
+    plugin_reload_notice: Option<String>,
 ) -> symposium::OutputEvent {
     match input {
         symposium::InputEvent::PreToolUse(_) => {
             symposium::OutputEvent::empty_for(HookEvent::PreToolUse)
         }
-        symposium::InputEvent::PostToolUse(post) => {
-            handle_post_tool_use(sym, post, notify_about_possible_new_plugins).await
+        symposium::InputEvent::PostToolUse(_) => {
+            mid_session_sync_notices(
+                sym,
+                deps,
+                HookEvent::PostToolUse,
+                notify_about_possible_new_plugins,
+                plugin_reload_notice,
+            )
+            .await
         }
-        symposium::InputEvent::UserPromptSubmit(prompt) => {
-            handle_user_prompt_submit(sym, prompt, notify_about_possible_new_plugins).await
+        symposium::InputEvent::UserPromptSubmit(_) => {
+            mid_session_sync_notices(
+                sym,
+                deps,
+                HookEvent::UserPromptSubmit,
+                notify_about_possible_new_plugins,
+                plugin_reload_notice,
+            )
+            .await
         }
         symposium::InputEvent::SessionStart(session) => {
-            handle_session_start(sym, session, deps).await
+            handle_session_start(sym, session, deps, plugin_reload_notice).await
         }
         _ => symposium::OutputEvent::empty_for(HookEvent::PreToolUse),
     }
@@ -578,11 +719,13 @@ async fn handle_session_start(
     sym: &Symposium,
     _payload: &SessionStartInput,
     deps: &Arc<Workspace>,
+    plugin_reload_notice: Option<String>,
 ) -> OutputEvent {
     let fragments = [
         discovery_hint(sym, deps).await,
         consent_hint(sym, deps).await,
         update_nudge(sym),
+        plugin_reload_notice,
     ]
     .into_iter()
     .flatten()
@@ -603,11 +746,13 @@ async fn discovery_hint(sym: &Symposium, deps: &Arc<Workspace>) -> Option<String
     let dep_ids = deps.dep_ids().await.to_vec();
 
     let pms = deps.pms();
-    let used = workspace
-        .as_ref()
-        .map(|ws| crate::discovery::used_plugins(sym, pms, &registry.plugins, &ws.root))
-        .unwrap_or_default();
-    let mut ctx = crate::predicate::PredicateContext::new(&dep_ids).with_used(&used);
+    let used = match &workspace {
+        Some(ws) => crate::discovery::used_plugins(sym, pms, &registry.plugins, &ws.root).await,
+        None => Vec::new(),
+    };
+    let mut ctx = crate::predicate::PredicateContext::new(&dep_ids)
+        .with_used(&used)
+        .with_cwd(deps.start());
     let active = crate::plugins::active_plugins(
         sym,
         &registry,
@@ -632,18 +777,32 @@ async fn discovery_hint(sym: &Symposium, deps: &Arc<Workspace>) -> Option<String
 /// Surface dependency plugins awaiting consent. A hook runs on the agent's
 /// behalf, so it must never block on stdin — the candidates are reported as
 /// context, with a pointer at the interactive command that can actually ask.
-/// `None` when nothing is pending.
+/// Each is named with what the audits say about it, in the consent prompt's
+/// words, so the agent can pass that on. `None` when nothing is pending.
 async fn consent_hint(sym: &Symposium, deps: &Arc<Workspace>) -> Option<String> {
-    let names = crate::discovery::pending_candidates(sym, deps).await;
-    if names.is_empty() {
+    let pending = crate::discovery::pending_candidates(sym, deps).await;
+    if pending.is_empty() {
         return None;
     }
+    let named: Vec<String> = pending
+        .iter()
+        .map(|c| match &c.audit {
+            Some(audit) => format!("{} ({audit})", c.name()),
+            None => c.name().to_string(),
+        })
+        .collect();
+    // Only when a list was read do the names carry an answer to qualify.
+    let audited_or_not = if pending.iter().any(|c| c.audit.is_some()) {
+        ", audited or not"
+    } else {
+        ""
+    };
     Some(format!(
         "These dependencies ship agent plugins that are not enabled yet: {}. \
-         They stay off until the user consents — tell the user to run \
-         `cargo agents sync` (which asks about each one) or \
+         They stay off until the user consents{audited_or_not} — tell the user \
+         to run `cargo agents sync` (which asks about each one) or \
          `cargo agents use <name>`. Do not enable them yourself.",
-        names.join(", ")
+        named.join(", ")
     ))
 }
 
@@ -668,36 +827,27 @@ fn update_nudge(sym: &Symposium) -> Option<String> {
     ))
 }
 
-async fn handle_post_tool_use(
-    _sym: &Symposium,
-    _post: &symposium::PostToolUseInput,
+async fn mid_session_sync_notices(
+    sym: &Symposium,
+    deps: &Arc<Workspace>,
+    event: HookEvent,
     notify_about_possible_new_plugins: bool,
+    plugin_reload_notice: Option<String>,
 ) -> symposium::OutputEvent {
-    possible_new_plugins_notice(HookEvent::PostToolUse, notify_about_possible_new_plugins)
-}
-
-async fn handle_user_prompt_submit(
-    _sym: &Symposium,
-    _prompt_payload: &symposium::UserPromptSubmitInput,
-    notify_about_possible_new_plugins: bool,
-) -> symposium::OutputEvent {
-    possible_new_plugins_notice(
-        HookEvent::UserPromptSubmit,
-        notify_about_possible_new_plugins,
-    )
-}
-
-fn possible_new_plugins_notice(event: HookEvent, notify: bool) -> symposium::OutputEvent {
-    if !notify {
-        return symposium::OutputEvent::empty_for(event);
+    let possible_new_plugins = if notify_about_possible_new_plugins {
+        consent_hint(sym, deps).await
+    } else {
+        None
+    };
+    let fragments: Vec<String> = [possible_new_plugins, plugin_reload_notice]
+        .into_iter()
+        .flatten()
+        .collect();
+    if fragments.is_empty() {
+        symposium::OutputEvent::empty_for(event)
+    } else {
+        symposium::OutputEvent::with_context(event, fragments.join("\n\n"))
     }
-    symposium::OutputEvent::with_context(
-        event,
-        "The workspace's dependencies just changed, so there may be new agent plugins \
-         available from them. They stay off until the user consents: tell the user to run \
-         `cargo agents sync` in their terminal to review them. Do not enable them yourself."
-            .to_string(),
-    )
 }
 
 pub enum PluginHookOutput {
@@ -741,11 +891,14 @@ pub async fn dispatch_plugin_hooks(
         Vec::new()
     };
     let pms = deps.pms();
-    let used = workspace
-        .as_ref()
-        .map(|ws| crate::discovery::used_plugins(sym, pms, &registry.plugins, &ws.root))
-        .unwrap_or_default();
-    let mut ctx = crate::predicate::PredicateContext::new(&dep_ids).with_used(&used);
+    let used = match &workspace {
+        Some(ws) => crate::discovery::used_plugins(sym, pms, &registry.plugins, &ws.root).await,
+        None => Vec::new(),
+    };
+    let dir = deps.start().filter(|dir| dir.is_dir());
+    let mut ctx = crate::predicate::PredicateContext::new(&dep_ids)
+        .with_used(&used)
+        .with_cwd(dir);
     // Dispatch over the active set — registry plugins plus crate-sourced ones —
     // so a crate plugin's hooks fire exactly like a registry plugin's.
     let plugins = crate::plugins::active_plugins(
@@ -761,8 +914,17 @@ pub async fn dispatch_plugin_hooks(
 
     let mut output = prior_output;
     let mut context = JoinedContext::new(event, prior_context);
+    let dispatch_deadline = Instant::now() + PLUGIN_HOOKS_BUDGET;
 
     for hook in hooks {
+        if Instant::now() >= dispatch_deadline {
+            tracing::warn!(
+                plugin = %hook.plugin_name,
+                hook = %hook.hook_name,
+                "plugin hooks used up their time budget; skipping hook"
+            );
+            continue;
+        }
         tracing::info!(
             plugin = %hook.plugin_name,
             hook = %hook.hook_name,
@@ -788,28 +950,19 @@ pub async fn dispatch_plugin_hooks(
             }
         };
 
-        let spawn_res = match build_spawn_spec(sym, &hook).await {
-            Ok(spec) => spawn_from_spec(spec),
+        let run_res = match build_spawn_spec(sym, &hook, dispatch_deadline).await {
+            Ok(spec) => {
+                let deadline = dispatch_deadline.min(Instant::now() + PLUGIN_HOOK_TIMEOUT);
+                run_with_deadline(spec, dir, stdin_str.into_bytes(), deadline)
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "failed to prepare hook command");
                 continue;
             }
         };
 
-        match spawn_res {
-            Ok(mut child) => {
-                if let Some(mut stdin) = child.stdin.take() {
-                    let _ = stdin.write_all(stdin_str.as_bytes());
-                }
-
-                let child_out = match child.wait_with_output() {
-                    Ok(o) => o,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "failed waiting for hook process");
-                        continue;
-                    }
-                };
-
+        match run_res {
+            Ok(Some(child_out)) => {
                 tracing::trace!(?child_out, "hook finished");
 
                 let exit_code = child_out.status.code();
@@ -823,8 +976,16 @@ pub async fn dispatch_plugin_hooks(
                 );
                 match exit_code {
                     None | Some(2) => return Err(child_out.stderr),
-                    Some(0) if child_out.stdout.is_empty() => continue,
-                    Some(0) => {
+                    Some(code) => {
+                        if code != 0 {
+                            tracing::warn!(
+                                exit_code = code,
+                                "plugin hook exited with non-zero (continuing)"
+                            );
+                        }
+                        if child_out.stdout.is_empty() {
+                            continue;
+                        }
                         // Parse output and convert to host agent format.
                         // Two cases: native (same as host) or symposium.
                         let host_handler = crate::hook_schema::agent_event(host_agent, event);
@@ -833,7 +994,7 @@ pub async fn dispatch_plugin_hooks(
                         let (host_json, hook_output) = if hook_agent == Some(host_agent) {
                             // Native format — parse as host agent output
                             match host_h.parse_output(&child_out.stdout) {
-                                Ok(o) => (o.to_hook_output(), Some(o.to_symposium())),
+                                Ok(o) => (o.to_hook_output(), o.to_symposium()),
                                 Err(e) => {
                                     tracing::warn!(error = %e, "failed to parse hook output");
                                     continue;
@@ -841,26 +1002,27 @@ pub async fn dispatch_plugin_hooks(
                             }
                         } else {
                             // Symposium format — parse and convert to host agent
-                            match serde_json::from_slice::<serde_json::Value>(&child_out.stdout) {
-                                Ok(v) => {
-                                    if let Ok(sym_out) =
-                                        serde_json::from_value::<symposium::OutputEvent>(v.clone())
-                                    {
-                                        let host_out = host_h.translate_output(&sym_out);
-                                        (host_out.to_hook_output(), Some(sym_out))
-                                    } else {
-                                        (v, None)
-                                    }
+                            match serde_json::from_slice::<symposium::OutputEvent>(
+                                &child_out.stdout,
+                            ) {
+                                Ok(sym_out) => {
+                                    let host_out = host_h.translate_output(&sym_out);
+                                    (host_out.to_hook_output(), sym_out)
                                 }
                                 Err(e) => {
-                                    tracing::warn!(error = %e, "failed to parse hook output");
+                                    tracing::warn!(
+                                        plugin = %hook.plugin_name,
+                                        hook = %hook.hook_name,
+                                        error = %e,
+                                        "plugin hook output is not a symposium output; ignoring it"
+                                    );
                                     continue;
                                 }
                             }
                         };
 
-                        merge(&mut output, host_json);
-                        if hook_output.as_ref().is_some_and(denies) {
+                        host_h.merge_output(&mut output, host_json);
+                        if denies(&hook_output) {
                             tracing::info!(
                                 plugin = %hook.plugin_name,
                                 hook = %hook.hook_name,
@@ -868,15 +1030,24 @@ pub async fn dispatch_plugin_hooks(
                             );
                             return Ok(output);
                         }
-                        context.add(hook_output.as_ref(), &mut output, host_h.as_ref());
-                    }
-                    Some(code) => {
-                        tracing::warn!(
-                            exit_code = code,
-                            "plugin hook exited with non-zero (continuing)"
-                        );
+                        context.add(&hook_output, &mut output, host_h.as_ref());
                     }
                 }
+            }
+            Ok(None) => {
+                tracing::debug!(
+                    report = %crate::report::ReportEvent::HookDispatched {
+                        plugin: hook.plugin_name.clone(),
+                        hook: hook.hook_name.clone(),
+                        exit_code: None,
+                        error: Some("timed out".to_string()),
+                    },
+                );
+                tracing::warn!(
+                    plugin = %hook.plugin_name,
+                    hook = %hook.hook_name,
+                    "plugin hook timed out and was killed; its output is ignored"
+                );
             }
             Err(e) => {
                 tracing::debug!(
@@ -887,7 +1058,7 @@ pub async fn dispatch_plugin_hooks(
                         error: Some(e.to_string()),
                     },
                 );
-                tracing::warn!(error = %e, "failed to spawn hook command");
+                tracing::warn!(error = %e, "failed to run hook command");
             }
         }
     }
@@ -914,11 +1085,10 @@ impl JoinedContext {
     }
 
     /// Add `hook_output`'s context and write the joined text back into
-    /// `output`, whose context the hook's own output has just replaced (or,
-    /// for Antigravity's `injectSteps` list, emptied).
+    /// `output`, whose context the hook's own output has just replaced.
     fn add(
         &mut self,
-        hook_output: Option<&symposium::OutputEvent>,
+        hook_output: &symposium::OutputEvent,
         output: &mut serde_json::Value,
         handler: &dyn crate::hook_schema::ErasedAgentHookEvent,
     ) {
@@ -928,7 +1098,7 @@ impl JoinedContext {
         ) {
             return;
         }
-        if let Some(more) = hook_output.and_then(|o| o.additional_context()) {
+        if let Some(more) = hook_output.additional_context() {
             self.text = Some(match self.text.take() {
                 Some(text) => format!("{text}\n\n{more}"),
                 None => more.to_string(),
@@ -936,7 +1106,7 @@ impl JoinedContext {
         }
         if let Some(text) = &self.text {
             let joined = OutputEvent::with_context(self.event, text.clone());
-            merge(output, handler.translate_output(&joined).to_hook_output());
+            handler.merge_output(output, handler.translate_output(&joined).to_hook_output());
         }
     }
 }
@@ -971,10 +1141,10 @@ pub fn merge(a: &mut serde_json::Value, b: serde_json::Value) {
     *a = b;
 }
 
-/// Match plugin hooks against the incoming event, selecting at most one hook
-/// per plugin based on format priority:
-/// 1. A hook whose format matches the host agent (native fidelity).
-/// 2. A symposium-format hook (portable fallback).
+/// Match plugin hooks against the incoming event, selecting each plugin's
+/// matching hooks of one format based on priority:
+/// 1. Hooks whose format matches the host agent (native fidelity).
+/// 2. Symposium-format hooks (portable fallback).
 /// 3. Otherwise, nothing fires for that plugin.
 ///
 /// The resulting `ResolvedHook`s are ready to dispatch without further plugin
@@ -1000,8 +1170,8 @@ fn dispatched_hooks_for_payload(
             continue;
         }
 
-        let mut native_match: Option<&crate::plugins::Hook> = None;
-        let mut symposium_match: Option<&crate::plugins::Hook> = None;
+        let mut native_matches = Vec::new();
+        let mut symposium_matches = Vec::new();
 
         for hook in &parsed_plugin.manifest.hooks {
             if hook.event != input.event() {
@@ -1012,14 +1182,17 @@ fn dispatched_hooks_for_payload(
             {
                 continue;
             }
+            if hook.agent.is_some_and(|agent| agent != host_agent) {
+                continue;
+            }
 
             match hook.format.as_agent() {
                 Some(agent) if agent == host_agent => {
-                    native_match = Some(hook);
+                    native_matches.push(hook);
                 }
                 None => {
                     // format = "symposium"
-                    symposium_match = Some(hook);
+                    symposium_matches.push(hook);
                 }
                 Some(_) => {
                     // Different agent format — does not fire on this agent.
@@ -1027,23 +1200,39 @@ fn dispatched_hooks_for_payload(
             }
         }
 
-        let selected = native_match.or(symposium_match);
-        if let Some(hook) = selected {
-            // Hook-level predicates are evaluated at dispatch so they pick up
-            // live state (file present, tool installed, crate present, …).
-            if !hook.predicates.evaluate(ctx) {
+        let any_candidate = !native_matches.is_empty() || !symposium_matches.is_empty();
+        let mut selected: Vec<_> = native_matches
+            .into_iter()
+            .filter(|hook| hook_predicates_hold(parsed_plugin, hook, input, ctx))
+            .collect();
+        if selected.is_empty() {
+            selected = symposium_matches
+                .into_iter()
+                .filter(|hook| hook_predicates_hold(parsed_plugin, hook, input, ctx))
+                .collect();
+        }
+        if selected.is_empty() {
+            if !any_candidate
+                && parsed_plugin
+                    .manifest
+                    .hooks
+                    .iter()
+                    .any(|h| h.event == input.event())
+            {
                 tracing::debug!(
                     report = %crate::report::ReportEvent::HookConsidered {
                         plugin: parsed_plugin.manifest.name.clone(),
-                        hook: hook.name.clone(),
+                        hook: "(none)".into(),
                         event: format!("{:?}", input.event()),
                         selected: false,
-                        format: Some(format!("{:?}", hook.format)),
-                        reason: Some("hook predicates not satisfied".into()),
+                        format: None,
+                        reason: Some("no hook matches this agent and tool".into()),
                     },
                 );
-                continue;
             }
+            continue;
+        }
+        for hook in selected {
             tracing::debug!(
                 report = %crate::report::ReportEvent::HookConsidered {
                     plugin: parsed_plugin.manifest.name.clone(),
@@ -1065,26 +1254,34 @@ fn dispatched_hooks_for_payload(
                     );
                 }
             }
-        } else if parsed_plugin
-            .manifest
-            .hooks
-            .iter()
-            .any(|h| h.event == input.event())
-        {
-            tracing::debug!(
-                report = %crate::report::ReportEvent::HookConsidered {
-                    plugin: parsed_plugin.manifest.name.clone(),
-                    hook: "(none)".into(),
-                    event: format!("{:?}", input.event()),
-                    selected: false,
-                    format: None,
-                    reason: Some("no matching format for this agent".into()),
-                },
-            );
         }
     }
 
     out
+}
+
+/// Hook-level predicates are evaluated at dispatch so they pick up live state
+/// (file present, tool installed, crate present, ...).
+fn hook_predicates_hold(
+    plugin: &Plugin,
+    hook: &crate::plugins::Hook,
+    input: &symposium::InputEvent,
+    ctx: &mut crate::predicate::PredicateContext,
+) -> bool {
+    let holds = hook.predicates.evaluate(ctx);
+    if !holds {
+        tracing::debug!(
+            report = %crate::report::ReportEvent::HookConsidered {
+                plugin: plugin.manifest.name.clone(),
+                hook: hook.name.clone(),
+                event: format!("{:?}", input.event()),
+                selected: false,
+                format: Some(format!("{:?}", hook.format)),
+                reason: Some("hook predicates not satisfied".into()),
+            },
+        );
+    }
+    holds
 }
 
 #[cfg(test)]
@@ -1204,7 +1401,7 @@ mod tests {
             None,
             None,
         ));
-        let output = dispatch_builtin(&sym, &input, &deps, false).await;
+        let output = dispatch_builtin(&sym, &input, &deps, false, None).await;
         assert!(output.additional_context().is_none());
     }
 
@@ -1220,7 +1417,7 @@ mod tests {
             Some("test-session".to_string()),
             Some("/tmp".to_string()),
         ));
-        let output = dispatch_builtin(&sym, &input, &deps, false).await;
+        let output = dispatch_builtin(&sym, &input, &deps, false, None).await;
         assert!(output.additional_context().is_none());
     }
 
@@ -1234,8 +1431,74 @@ mod tests {
             Some("test-session".to_string()),
             Some("/tmp".to_string()),
         ));
-        let output = dispatch_builtin(&sym, &input, &deps, false).await;
+        let output = dispatch_builtin(&sym, &input, &deps, false, None).await;
         assert!(output.additional_context().is_none());
+    }
+
+    fn run_script(body: &str, input: Vec<u8>, timeout: Duration) -> Option<Output> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hook.sh");
+        std::fs::write(&path, body).unwrap();
+        let spec = SpawnSpec::Script {
+            path,
+            args: vec![],
+            env: vec![],
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ =
+                tx.send(run_with_deadline(spec, None, input, Instant::now() + timeout).unwrap());
+        });
+        rx.recv_timeout(timeout + Duration::from_secs(5))
+            .expect("the hook returns by its deadline")
+    }
+
+    #[test]
+    fn hook_that_ignores_a_large_input_and_writes_a_lot_completes() {
+        let body = "i=0\nwhile [ $i -lt 4000 ]; do echo \"warning: unused variable at src/lib.rs:$i\" >&2; i=$((i+1)); done\necho done\n";
+        let output = run_script(body, vec![b'x'; 300_000], Duration::from_secs(10))
+            .expect("the hook finishes before its deadline");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"done\n");
+        assert!(output.stderr.len() > 150_000, "{}", output.stderr.len());
+    }
+
+    #[test]
+    fn background_job_does_not_hold_the_hook() {
+        let started = Instant::now();
+        let output = run_script(
+            "cat >/dev/null\nsleep 5 &\necho started\n",
+            b"{}".to_vec(),
+            Duration::from_secs(10),
+        )
+        .expect("the hook finishes before its deadline");
+        assert_eq!(output.stdout, b"started\n");
+        assert!(started.elapsed() < Duration::from_secs(4));
+    }
+
+    #[test]
+    fn hook_past_its_deadline_is_killed() {
+        let started = Instant::now();
+        let output = run_script("sleep 30\n", b"{}".to_vec(), Duration::from_millis(200));
+        assert!(output.is_none());
+        assert!(started.elapsed() < Duration::from_secs(4));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timed_out_hook_stops_its_child_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("child-ran");
+        let script = format!(
+            "sh -c 'sleep 0.5; echo survived > \"{}\"'\necho finished\n",
+            marker.display()
+        );
+        assert!(run_script(&script, b"{}".to_vec(), Duration::from_millis(100)).is_none());
+        std::thread::sleep(Duration::from_millis(700));
+        assert!(
+            !marker.exists(),
+            "child mutated files after the hook timed out"
+        );
     }
 
     #[test]
@@ -1296,6 +1559,8 @@ mod tests {
             .collect();
         let plugin = PluginManifest {
             name: "test-plugin".into(),
+            version: None,
+            description: None,
             predicates: crate::predicate::PredicateSet {
                 predicates: plugin_predicates,
             },
@@ -1312,6 +1577,8 @@ mod tests {
             manifest: plugin,
             workspace_member: false,
             canonical: PackageId::new("test", "test-plugin", ANY_VERSION),
+            agent_plugin_root: None,
+            root: PathBuf::new(),
         }
     }
 
@@ -1358,6 +1625,87 @@ mod tests {
             &mut crate::predicate::PredicateContext::new(&[]),
         );
         assert_eq!(hooks.len(), 1);
+    }
+
+    #[test]
+    fn dispatch_runs_every_matching_hook_of_the_selected_format() {
+        let mut plugin = plugin_with_hook(vec![], vec![]);
+        let portable = plugin.manifest.hooks[0].clone();
+        let native = |name: &str| crate::plugins::Hook {
+            name: name.into(),
+            format: crate::plugins::HookFormat::Claude,
+            ..portable.clone()
+        };
+        plugin.manifest.hooks = vec![native("check"), portable.clone(), native("log")];
+
+        let hooks = dispatched_hooks_for_payload(
+            &[plugin],
+            &pre_tool_use_input(),
+            HookAgent::Claude,
+            &mut crate::predicate::PredicateContext::new(&[]),
+        );
+        let names: Vec<_> = hooks.iter().map(|h| h.hook_name.as_str()).collect();
+        assert_eq!(names, ["check", "log"]);
+    }
+
+    #[test]
+    fn dispatch_skips_hook_restricted_to_another_agent() {
+        let mut plugin = plugin_with_hook(vec![], vec![]);
+        plugin.manifest.hooks[0].agent = Some(HookAgent::Claude);
+        let dispatch = |agent| {
+            dispatched_hooks_for_payload(
+                std::slice::from_ref(&plugin),
+                &pre_tool_use_input(),
+                agent,
+                &mut crate::predicate::PredicateContext::new(&[]),
+            )
+            .len()
+        };
+        assert_eq!(dispatch(HookAgent::Claude), 1);
+        assert_eq!(dispatch(HookAgent::Codex), 0);
+    }
+
+    #[test]
+    fn dispatch_falls_back_to_portable_hook_when_native_predicates_fail() {
+        use crate::plugins::HookFormat;
+
+        let with_native_predicate = |command: &str| {
+            let mut plugin = plugin_with_hook(vec![], vec![]);
+            let portable = plugin.manifest.hooks[0].clone();
+            let mut native = portable.clone();
+            native.name = "native".into();
+            native.format = HookFormat::Claude;
+            native.predicates.predicates = vec![crate::predicate::Predicate::Shell(command.into())];
+            plugin.manifest.hooks = vec![
+                crate::plugins::Hook {
+                    name: "portable-first".into(),
+                    ..portable.clone()
+                },
+                crate::plugins::Hook {
+                    name: "portable-last".into(),
+                    ..portable
+                },
+                native,
+            ];
+            plugin
+        };
+        let selected = |plugin: crate::plugins::Plugin| {
+            dispatched_hooks_for_payload(
+                &[plugin],
+                &pre_tool_use_input(),
+                HookAgent::Claude,
+                &mut crate::predicate::PredicateContext::new(&[]),
+            )
+            .into_iter()
+            .map(|hook| hook.hook_name)
+            .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            selected(with_native_predicate("false")),
+            ["portable-first", "portable-last"]
+        );
+        assert_eq!(selected(with_native_predicate("true")), ["native"]);
     }
 
     /// A plugin gated on a concrete crate must not dispatch its hooks in a

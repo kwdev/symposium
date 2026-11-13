@@ -1,8 +1,9 @@
 //! Persistent state: `state.toml` in the config directory.
 //!
 //! Tracks the version of the binary that last touched the config/cache
-//! directories, the last time an update check was performed, and the MCP
-//! server entries Symposium wrote into agent configs.
+//! directories, the last time an update check was performed, the MCP
+//! server entries Symposium wrote into agent configs, and the `use` entries
+//! `plugin try` added.
 //! Future versions can use a version mismatch to trigger migrations.
 
 use std::fs;
@@ -26,11 +27,25 @@ pub struct State {
     /// Last time we checked crates.io for a newer version.
     #[serde(default, rename = "last-update-check")]
     pub last_update_check: Option<DateTime<Utc>>,
+    #[serde(default, rename = "detected-agents")]
+    pub detected_agents: Vec<String>,
+    /// None means choices predate explicit-choice tracking and need migration.
+    #[serde(
+        default,
+        rename = "explicit-agents",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub explicit_agents: Option<Vec<String>>,
 
     /// MCP server entries Symposium wrote. Removal is limited to these, since
     /// a server name alone may also belong to an entry the user wrote.
     #[serde(rename = "mcp-server")]
     pub mcp_servers: Vec<McpRegistration>,
+
+    /// Plugins whose global `use` entry `plugin try` added. `--remove` drops
+    /// only these, since the user may have written the same entry.
+    #[serde(rename = "trial-use")]
+    pub trial_uses: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,8 +60,14 @@ struct RawState {
     version: String,
     #[serde(default, rename = "last-update-check")]
     last_update_check: Option<DateTime<Utc>>,
+    #[serde(default, rename = "detected-agents")]
+    detected_agents: Vec<String>,
+    #[serde(default, rename = "explicit-agents")]
+    explicit_agents: Option<Vec<String>>,
     #[serde(default, rename = "mcp-server")]
     mcp_servers: Vec<McpRegistration>,
+    #[serde(default, rename = "trial-use")]
+    trial_uses: Vec<String>,
 }
 
 impl RawState {
@@ -54,7 +75,10 @@ impl RawState {
         State {
             version: self.version,
             last_update_check: self.last_update_check,
+            detected_agents: self.detected_agents,
+            explicit_agents: self.explicit_agents,
             mcp_servers: self.mcp_servers,
+            trial_uses: self.trial_uses,
         }
     }
 }
@@ -64,7 +88,10 @@ impl Default for State {
         Self {
             version: CURRENT_VERSION.to_string(),
             last_update_check: None,
+            detected_agents: Vec::new(),
+            explicit_agents: None,
             mcp_servers: Vec::new(),
+            trial_uses: Vec::new(),
         }
     }
 }
@@ -159,6 +186,37 @@ pub fn forget_mcp_registrations(config_dir: &Path, removed: &[McpRegistration]) 
     save(config_dir, &state);
 }
 
+pub fn trial_uses(config_dir: &Path) -> Vec<String> {
+    load(config_dir)
+        .map(|state| state.trial_uses)
+        .unwrap_or_default()
+}
+
+pub fn record_trial_use(config_dir: &Path, name: &str) {
+    let mut state = load(config_dir).unwrap_or_default();
+    if !state.trial_uses.iter().any(|n| n == name) {
+        state.trial_uses.push(name.to_string());
+        save(config_dir, &state);
+    }
+}
+
+pub fn forget_trial_use(config_dir: &Path, name: &str) {
+    let mut state = load(config_dir).unwrap_or_default();
+    let before = state.trial_uses.len();
+    state.trial_uses.retain(|n| n != name);
+    if state.trial_uses.len() != before {
+        save(config_dir, &state);
+    }
+}
+
+/// Persist selection provenance without disturbing update checks or MCP registrations.
+pub fn record_agent_choices(config_dir: &Path, explicit: Vec<String>, detected: Vec<String>) {
+    let mut state = load(config_dir).unwrap_or_default();
+    state.explicit_agents = Some(explicit);
+    state.detected_agents = detected;
+    save(config_dir, &state);
+}
+
 fn state_path(config_dir: &Path) -> PathBuf {
     config_dir.join(STATE_FILE)
 }
@@ -166,6 +224,29 @@ fn state_path(config_dir: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_choice_history_preserves_other_state_and_distinguishes_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        super::stamp(dir.path());
+        assert!(super::load(dir.path()).unwrap().explicit_agents.is_none());
+        super::record_update_check(dir.path());
+        let registration = super::McpRegistration {
+            agent: "claude".into(),
+            file: dir.path().join("mcp.json"),
+            name: "test".into(),
+        };
+        let mut state = super::load(dir.path()).unwrap();
+        state.mcp_servers.push(registration.clone());
+        super::save(dir.path(), &state);
+        super::record_agent_choices(dir.path(), vec![], vec!["codex".into()]);
+        super::stamp(dir.path());
+        let state = super::load(dir.path()).unwrap();
+        assert_eq!(state.explicit_agents, Some(vec![]));
+        assert_eq!(state.detected_agents, vec!["codex"]);
+        assert!(state.last_update_check.is_some());
+        assert_eq!(state.mcp_servers, vec![registration]);
+    }
 
     #[test]
     fn stamp_creates_file() {

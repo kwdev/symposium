@@ -11,11 +11,13 @@ A plugin hook declares which wire format its handler expects:
 
 ## Dispatch rule
 
-When symposium's global handler receives an event from agent A, it loads all plugins and finds hooks matching the event. For each plugin, it picks at most one hook to deliver:
+When symposium's global handler receives an event from agent A, it loads all plugins and finds each plugin's candidate hooks: those whose event and `matcher` match, whose `agent`, if set, is A, and whose `predicates` hold. For each plugin, it picks one format and delivers to every candidate of that format, in manifest order:
 
-1. If the plugin declares a hook with `format` matching **agent A** → deliver the input unmodified (the handler already expects this agent's native format).
-2. Otherwise, if the plugin declares a **symposium-format** hook → convert to symposium canonical and deliver.
-3. Otherwise → nothing fires for this plugin.
+1. If the plugin declares hooks with `format` matching **agent A**, each receives the input unmodified (the handler already expects this agent's native format).
+2. Otherwise, if the plugin declares **symposium-format** hooks, each receives the input converted to symposium canonical.
+3. Otherwise, nothing fires for this plugin.
+
+A plugin can hold several handlers for one event, such as a blocking check and a logger imported from a Claude Code plugin, so they all run. A native match still replaces the plugin's symposium-format hooks for that event: they are its fallback for other agents, not extra handlers.
 
 Symposium never converts between agent-specific formats. A `format = "claude"` hook will only fire on Claude — it won't be translated for Copilot or Antigravity. If you want cross-agent coverage, provide a symposium-format hook as a fallback.
 
@@ -37,8 +39,20 @@ A plugin with only `format = "claude"`:
 
 Symposium converts the hook's output back to the current agent's wire format before returning it to the agent:
 
-- Native format matching the host agent → pass through directly.
+- Native format matching the host agent: pass through directly. A native Claude or Codex `SessionStart` or `UserPromptSubmit` hook may print plain text instead of JSON; Symposium adds it to the context, as those agents do.
 - Symposium format → convert to host agent's wire format.
+
+Stdout from a symposium-format hook that is not a canonical output, such as `null` or an object without the event tag, is ignored with a warning, like invalid JSON. Only translated output reaches the agent, so one plugin cannot replace or clear what the others returned.
+
+## Time limits and cancellation
+
+A hook runs inside the single `cargo agents hook` call the agent is waiting for, so every plugin hook of one event shares an 8-second budget, and each one gets at most 5 seconds of it (see [the hook flow](./hook-flow.md)). The budget covers preparing the hook's command too: acquiring its source and running its `install_commands`. A `cargo binstall` or `cargo install` that acquisition started, and the `git ls-remote` that checks a git source, is killed with everything it started when acquisition stops at the deadline, so no installer keeps running, or keeps symposium from exiting, after the hook is skipped.
+
+Stopping a hook has to stop everything it started, or a timed-out hook keeps changing the workspace after the agent has moved on, and a child holding symposium's stderr keeps the agent waiting. So on Unix each hook, and each `install_commands` entry run during dispatch, gets its own process group, and a timeout kills the whole group; on Windows, `taskkill /T` kills the process tree. `symposium_install::process_tree` holds both. Outside hook dispatch (subcommands, `sync`, the `SessionStart` prewarm), `install_commands` and the installers acquisition starts stay in symposium's group (`InstallContext::in_foreground`), so Ctrl-C and terminal prompts still reach them. The `git ls-remote` probe never prompts (`GIT_TERMINAL_PROMPT=0`), since a prompt from a group of its own would stop it instead.
+
+A hook that exits on its own is done: background jobs it leaves running are not killed or waited for.
+
+On Antigravity, a native `PreToolUse` object with no `decision` (or an empty one) is read as the denial Antigravity takes it to be, and injected steps other than context (`userMessage`, `toolCall`) accumulate across hooks.
 
 ## Alternatives considered
 
