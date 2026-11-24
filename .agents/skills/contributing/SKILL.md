@@ -5,7 +5,15 @@ description: Write GitHub issues and PRs for the Symposium project and place the
 
 # Contributing tickets and PRs
 
-The rules live in the book page `md/design/contributing-tickets.md`. Read it before writing a ticket; this skill only says where to look and why the pieces exist.
+The rules live in upstream `md/design/contributing-tickets.md`. This branch has
+no local source Book. Read that page from the full revision recorded in
+`anchor-book/src/implementation-roadmaps/book-migration.md` with
+`git show REV:md/design/contributing-tickets.md`, substituting that revision for
+`REV`. Read governance the same way. The source-reading procedure is in
+`anchor-book/src/working-on-symposium.md#upstream-source-material`.
+
+Paths under `md/` below refer to upstream Git objects. Keep branch design and
+progress in the Anchor Book; do not recreate the source Book to write a ticket.
 
 ## Where things are
 

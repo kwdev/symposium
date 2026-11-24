@@ -719,7 +719,7 @@ pub async fn with_fixture(
     if matches!(mode, TestMode::AgentOnly) && agents.is_empty() {
         // libtest has no "skipped" result, so the test will still report `ok`.
         eprintln!(
-            "[test] agent-only test ran no agent: set SYMPOSIUM_ENABLE_AGENT_TESTING=1 (see md/design/running-tests.md)"
+            "[test] agent-only test ran no agent: set SYMPOSIUM_ENABLE_AGENT_TESTING=1 (see https://symposium-dev.github.io/symposium/design/running-tests.html)"
         );
     }
 

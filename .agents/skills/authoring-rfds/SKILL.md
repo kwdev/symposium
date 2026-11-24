@@ -5,11 +5,29 @@ description: Write and structure RFDs (Requests for Discussion) for the Symposiu
 
 # Authoring RFDs
 
+## Branch and upstream scope
+
+This branch maintains only the Anchor Book. Read the source revision and import
+rules in `anchor-book/src/working-on-symposium.md#upstream-source-material` and
+`anchor-book/src/implementation-roadmaps/book-migration.md`. Source paths below
+refer to that upstream Git revision; read them with `git show REV:path` after
+substituting the recorded revision. Do not recreate a local `md/` Book.
+
+The pinned engine does not support a first-class RFD section. For a branch design
+proposal, keep unresolved alternatives in a scoped roadmap experiment or in the
+engineer's discussion outside the Book, and reconcile agreed design, authority,
+anchors, and work together. Preserve imported RFD identities and source status
+through exact upstream links; source acceptance does not accept local records.
+
+For an explicitly assigned upstream RFD, use an upstream checkout and the process
+below, reading its template and process guidance first. An authoring assignment
+does not itself authorize opening or publishing a PR.
+
 ## What is an RFD?
 
-An RFD is a proposal for a non-trivial change. It lives in `md/rfds/<name>/README.md` and follows the template in `md/rfds/TEMPLATE/README.md`. RFDs are submitted as PRs; once merged they appear under the "Accepted" section of `md/SUMMARY.md`. When implementation is complete, they move to "Completed".
+An RFD is a proposal for a non-trivial change. Upstream, it lives in `md/rfds/<name>/README.md` and follows the template in `md/rfds/TEMPLATE/README.md`. RFDs are submitted as PRs; once merged they appear under the "Accepted" section of `md/SUMMARY.md`. When implementation is complete, they move to "Completed".
 
-## Process
+## Process for an assigned upstream RFD
 
 1. Create a subdirectory under `md/rfds/` (e.g., `md/rfds/my-feature/`).
 2. Copy the template from `md/rfds/TEMPLATE/README.md` into `md/rfds/my-feature/README.md`.

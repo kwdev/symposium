@@ -9,14 +9,19 @@ Watch for these patterns:
 - **Private is better**: Flag items that are more public than necessary. Default to private; use `pub(crate)` or `pub(super)` before `pub`. The library surface of symposium is mostly internal — `symposium-sdk` is the exception.
 - **Focus on the now**: Flag backwards-compatibility shims, re-exports of removed items, `#[deprecated]` stubs, or dead code left "just in case." Symposium is primarily an application; unused abstractions are waste, not investment.
 
-## RFD compliance
+## Design and source compliance
 
-Check whether the PR's changes relate to an active RFD (listed under "Accepted" in `md/SUMMARY.md`, with corresponding content in `md/rfds/`). Completed RFDs (under "Completed") are not active — ignore those.
+This branch maintains the Anchor Book in `anchor-book/`. Review affected design,
+authority, anchors, and roadmap evidence together. The source Book remains
+upstream; it is not a local `md/` tree. Use the pinned source revision and
+per-area reconciliation recorded in
+`anchor-book/src/implementation-roadmaps/book-migration.md` to read relevant
+upstream design and RFDs through Git.
 
-If the PR does relate to an active RFD:
-
-1. **Implementation plan updates**: Verify that the RFD's "Implementation plan and status" section is updated in this PR to reflect the work done (e.g., checking off items, adding new steps discovered during implementation).
-2. **Design consistency**: Compare the PR's approach against the RFD's design. Flag deviations that aren't documented in the RFD's status section. Minor deviations are fine if noted; undocumented major departures should be called out.
-3. **Scope alignment**: If the PR introduces changes outside the RFD's stated scope, note this — it may belong in a separate PR or the RFD scope may need updating.
-
-If the PR does not relate to any active RFD, skip these checks.
+Check scope against the assigned work. Preserve deliberate Anchor Book choices
+and flag conflicts with upstream claims. Source RFD acceptance or completion is
+not local design acceptance, implementation completion, or verification evidence.
+Keep progress in the Anchor Book roadmaps and preserve upstream proposal links.
+Unconverted areas remain explicitly pending; removing source files is not a
+semantic conversion. Check that source-dependent test fixtures are refreshed with
+their consumers and provenance when their upstream inputs change.

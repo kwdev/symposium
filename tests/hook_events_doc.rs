@@ -1,4 +1,4 @@
-//! Verifies that JSON examples in `md/reference/hook-events.md` deserialize
+//! Verifies that the pinned upstream hook-event examples deserialize
 //! as valid symposium hook events and round-trip cleanly through serde.
 
 use symposium::hook_schema::symposium::{InputEvent, OutputEvent};
@@ -52,7 +52,7 @@ fn is_output_section(section: &str) -> bool {
 
 #[test]
 fn doc_json_examples_roundtrip() {
-    let doc = include_str!("../md/reference/hook-events.md");
+    let doc = include_str!("fixtures/upstream-docs/hook-events.md");
     let blocks = extract_json_blocks(doc);
 
     assert!(

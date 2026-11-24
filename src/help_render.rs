@@ -1,6 +1,6 @@
 //! Custom `symposium --help` renderer.
 //!
-//! clap's auto help flag and help subcommand are disabled (see[`crate::cli::Cli`]), so top-level `--help` / `-h` / `help` / no-subcommand invocations land here *after* parsing and get an audience-grouped help text per `md/design/subcommands.md`.
+//! clap's auto help flag and help subcommand are disabled (see[`crate::cli::Cli`]), so top-level `--help` / `-h` / `help` / no-subcommand invocations land here *after* parsing and get an audience-grouped help text per the [upstream subcommand design](https://github.com/symposium-dev/symposium/blob/3516c051c07838bdde94ea780138a8ac1c3a79a1/md/design/subcommands.md).
 //!
 //! The header and options block are sliced out of clap's own rendered help, so the only hand-coded strings are the two section headings.
 //! If clap's format ever drifts and a slice marker isn't found, we fall back to clap's unmodified help rather than panic.

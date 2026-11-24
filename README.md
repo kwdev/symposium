@@ -151,6 +151,10 @@ See [Supporting your crate](https://symposium.dev/crate-authors/supporting-your-
 
 Full documentation lives at **[symposium.dev](https://symposium.dev)**: installation, configuration, plugin and hook authoring, supported-agent details, and design notes.
 
+Development on this branch uses the [Anchor Book](anchor-book/src/SUMMARY.md).
+The [source coverage](anchor-book/src/implementation-roadmaps/source-coverage.md)
+records design provenance and remaining reconciliation. User documentation remains upstream.
+
 ## Community
 
 Symposium is open source under [MIT or Apache-2.0](./LICENSE.txt). We welcome [contributors](https://symposium.dev/design/welcome.html) and maintain a [code of conduct](./CODE_OF_CONDUCT.md).

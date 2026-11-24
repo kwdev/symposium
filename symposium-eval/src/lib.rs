@@ -3,7 +3,7 @@
 //! Symposium did along the way.
 //!
 //! This crate is the engine behind `cargo xtask agent-eval`. The approved design
-//! is `md/rfds/skill-evaluation/`; `md/design/agent-eval.md` maps it onto this
+//! is the upstream `md/rfds/skill-evaluation/`; upstream `md/design/agent-eval.md` maps it onto this
 //! crate's modules.
 
 mod client;

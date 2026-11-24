@@ -1,5 +1,5 @@
 # Symposium's Anchor Book: its design, authority, and agreed work.
-# The user Book is configured separately in the repository root's book.toml.
+# The source user and contributor Book is maintained upstream.
 [book]
 title = "Symposium Anchor Book"
 description = "The design and development of Symposium."

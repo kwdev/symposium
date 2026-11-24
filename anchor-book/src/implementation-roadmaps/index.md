@@ -10,3 +10,6 @@ engine's roadmap format; see [Working on Symposium](../working-on-symposium.md#b
 
 - [Configuration Loading](configuration-loading.md): tests establish every
   configuration loading criterion.
+- [Book Migration](book-migration.md): repeat the design port as upstream changes
+  and prepare the final adoption. Its [code reconciliation](code-reconciliation.md)
+  records implementation matches, reproduced failures, and verification gaps.

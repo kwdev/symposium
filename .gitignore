@@ -35,9 +35,6 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# mdbook generated files
-/book/
-
 # Editor files
 .vscode/settings.json
 !vscode-extension/test-workspace/.vscode/settings.json

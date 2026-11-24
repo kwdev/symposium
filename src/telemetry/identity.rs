@@ -595,8 +595,7 @@ mod tests {
 
     use super::*;
 
-    const RECORDED_DATA: &str =
-        include_str!("../../md/rfds/telemetry-recording/contract/recorded-data.md");
+    const RECORDED_DATA: &str = include_str!("../../tests/fixtures/upstream-docs/recorded-data.md");
 
     const TEST_HEX: &str = "00112233445566778899aabbccddeeff";
 

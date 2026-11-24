@@ -1,8 +1,8 @@
 # Configuration Loading
 
 Adapted from the contribution guide's
-[configuration loading](https://github.com/symposium-dev/symposium/blob/main/md/design/configuration-loading.md)
-chapter.
+[configuration loading](https://github.com/symposium-dev/symposium/blob/3516c051c07838bdde94ea780138a8ac1c3a79a1/md/design/configuration-loading.md)
+chapter and [directory reference](https://github.com/symposium-dev/symposium/blob/3516c051c07838bdde94ea780138a8ac1c3a79a1/md/reference/configuration.md#directory-resolution).
 
 Symposium keeps user-wide configuration, cache, and logs outside any project and
 loads the user configuration, `config.toml`, once at startup. Hooks run on every
@@ -11,11 +11,12 @@ could not read must not be replaced by values the user never chose.
 
 ## Anchors
 
-> **`A-config-directory-resolution`** (draft): **User-wide directories resolve from documented variables, never the current directory**
-> Property: Symposium resolves its configuration, cache, and log directories from `SYMPOSIUM_HOME` first, then the matching `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, or `XDG_STATE_HOME` with `symposium` appended, then the default under `~/.symposium/`, with `cache/` and `logs/` under the configuration directory. An empty variable counts as unset, and a relative `XDG_*` value is ignored, so neither makes a directory depend on the current working directory.
+> **`A-config-directory-resolution`** (draft): **User-wide directories follow documented overrides and remain rooted at startup**
+> Property: Symposium resolves its configuration, cache, and log directories from `SYMPOSIUM_HOME` first, then the matching `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, or `XDG_STATE_HOME` with `symposium` appended, then the default under `~/.symposium/`, with `cache/` and `logs/` under the configuration directory. An empty variable counts as unset, and a relative `XDG_*` value is ignored. A relative `SYMPOSIUM_HOME` is resolved once against the directory where Symposium starts, so subsequent working-directory changes do not relocate its configuration, cache, or logs.
 > Authority: `R-predictable-directories`; `D-xdg-directory-resolution`
 > - Criterion `precedence` [test]: With each combination of SYMPOSIUM_HOME, the matching XDG variable, and neither set to absolute paths, the configuration, cache, and log directories are the ones the resolution table gives.
-> - Criterion `empty-and-relative` [test]: An empty SYMPOSIUM_HOME or XDG variable, and a relative XDG variable, resolve as if unset; no resulting directory depends on the working directory of the process.
+> - Criterion `empty-and-relative` [test]: With no nonempty SYMPOSIUM_HOME override, an empty SYMPOSIUM_HOME or XDG variable, and a relative XDG variable, resolve as if unset; no resulting directory depends on the working directory of the process.
+> - Criterion `startup-relative` [test]: With a relative SYMPOSIUM_HOME and absolute XDG alternatives set, configuration, cache, and logs resolve under the starting directory's SYMPOSIUM_HOME path. Later directory changes, including execution of a plugin in another workspace, neither relocate those paths nor create a second configuration, cache, or log tree.
 
 > **`A-config-unreadable-file-unchanged`** (draft): **A configuration Symposium cannot read is never overwritten**
 > Property: When `config.toml` exists but cannot be read or parsed, no Symposium command changes it. Saving the configuration fails with an error naming the file, so `init`, `use`, `telemetry enable` and `telemetry disable`, and the consent prompt in `sync` fail without writing it, and `sync` stops before changing any installed skill or hook. A missing or empty file is not an error: defaults apply and can be saved.
@@ -42,7 +43,11 @@ User-wide paths are resolved from environment variables in `dirs.rs`
 | Default | `~/.symposium/` | `~/.symposium/cache/` | `~/.symposium/logs/` |
 
 `dirs::env_dir` treats an empty variable as unset, and `dirs::xdg_dir` ignores a
-relative `XDG_*` value, as the XDG Base Directory specification asks.
+relative `XDG_*` value, as the XDG Base Directory specification asks. A relative
+`SYMPOSIUM_HOME` is anchored once to the process's starting directory. Resolved
+paths retain that meaning when commands or plugin processes use another working
+directory. This is the explicit exception to independence from the starting
+directory; empty variables and relative XDG values do not introduce one.
 
 ## Loading the user configuration
 
@@ -61,11 +66,3 @@ installed skill and hook would look as though it belonged to a removed agent.
 A file Symposium could not read says nothing about what the user chose, so
 nothing decided from the defaults may outlive the run. The other defaults apply
 as usual for that run.
-
-## Open questions
-
-1. **Relative `SYMPOSIUM_HOME`.** A relative `SYMPOSIUM_HOME` is used as given,
-   so it resolves against the working directory. Whether it should be ignored
-   like a relative `XDG_*` value, or rejected, is undecided; the
-   [directory anchor](#A-config-directory-resolution) covers only empty values and
-   relative XDG values.

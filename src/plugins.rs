@@ -5206,7 +5206,8 @@ mod tests {
 
     #[test]
     fn parse_subcommand_rejects_every_builtin_name() {
-        // Same list as md/reference/plugin-definition.md.
+        // Same list as the upstream plugin-definition reference:
+        // https://github.com/symposium-dev/symposium/blob/3516c051c07838bdde94ea780138a8ac1c3a79a1/md/reference/plugin-definition.md
         let builtins = [
             "init",
             "sync",

@@ -1,6 +1,7 @@
 //! Dual-mode agent integration tests.
 //!
-//! See `md/design/running-tests.md` for how to run these.
+//! See the upstream test guide for how to run these:
+//! https://github.com/symposium-dev/symposium/blob/3516c051c07838bdde94ea780138a8ac1c3a79a1/md/design/running-tests.md
 
 use std::fs;
 use std::path::{Path, PathBuf};

@@ -1,0 +1,35 @@
+name: Check Anchor Book
+
+on:
+  push:
+    branches: [main, codex/configuration-trial]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: anchor-book-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  book:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: anchor-book
+      - name: Install pinned Book tools
+        run: |
+          cargo install --git https://github.com/anchor-book/anchor-book --rev 7966c9fddb3e9b9a710444c365cd698550de9b5f --locked anchor-book
+          cargo install mdbook --version 0.5.4 --locked
+          cargo install mdbook-mermaid --version 0.17.1 --locked
+      - name: Check structure
+        run: anchorbook check --config anchorbook.toml
+      - name: Build Book
+        run: mdbook build anchor-book

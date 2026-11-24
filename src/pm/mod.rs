@@ -1,5 +1,5 @@
 //! Package managers: the seam from the [registry-centric plugin
-//! distribution RFD](../../md/rfds/registry-centric-plugins/README.md).
+//! distribution RFD](https://github.com/symposium-dev/symposium/blob/3516c051c07838bdde94ea780138a8ac1c3a79a1/md/rfds/registry-centric-plugins/README.md).
 //!
 //! A [`PackageId`] names a package as a `(pm, name, version)` tuple, and a
 //! [`PackageManager`] resolves ids of its ecosystem to content on disk. The

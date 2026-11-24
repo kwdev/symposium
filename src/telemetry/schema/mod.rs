@@ -703,7 +703,7 @@ where
 
 #[cfg(test)]
 const RECORDED_DATA_CONTRACT: &str =
-    include_str!("../../../md/rfds/telemetry-recording/contract/recorded-data.md");
+    include_str!("../../../tests/fixtures/upstream-docs/recorded-data.md");
 
 #[cfg(test)]
 fn recorded_data_example_block(section_heading: &str, opening_fence: &str) -> &'static str {
