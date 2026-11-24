@@ -201,11 +201,14 @@ discussion comments and the predicate-caching PR's review comments. Upstream
 | Reproduced finding | Tracking and disposition |
 | --- | --- |
 | Registry and chained plugin disablement | Open [issue #290](https://github.com/symposium-dev/symposium/issues/290) and [PR #423](https://github.com/symposium-dev/symposium/pull/423). The PR's head `4c1731f562b73dcc55705afe610dfd243d348f8b` contains the disable check and regression tests for both routes. Its [discussion](https://github.com/symposium-dev/symposium/pull/423#issuecomment-6796461993) already reproduces both failures. Reuse that tracking; no duplicate issue or additional diagnostic claim is warranted. This assessment inspected the patch but did not execute that PR's tests. |
-| Zero-TTL memory-cache reuse | No matching bug report found. [Implementation PR #268](https://github.com/symposium-dev/symposium/pull/268) and [RFD #262](https://github.com/symposium-dev/symposium/pull/262) state that `WatchTime(0)` disables caching. Prepare a separate bug report with the probe and tested revision. |
-| Relative file-watch invalidation | No matching bug report found. Prepare a separate bug report with the workspace-cwd reproduction. |
+| Zero-TTL memory-cache reuse | Filed [bug #530](https://github.com/symposium-dev/symposium/issues/530) after finding no matching report. [Implementation PR #268](https://github.com/symposium-dev/symposium/pull/268) and [RFD #262](https://github.com/symposium-dev/symposium/pull/262) state that `WatchTime(0)` disables caching. |
+| Relative file-watch invalidation | Filed [bug #531](https://github.com/symposium-dev/symposium/issues/531) after finding no matching report, with the workspace-cwd reproduction. |
 
-The two cache reports remain unfiled. The branch and this Book can supply
-reproducible evidence without making draft anchors accepted or verified.
+Both reports follow Symposium's bug form, have type Bug and the bug label, and
+cite the published branch and Book-led investigation. Their exact assertion
+failures were reproduced again on `12df46340d2e125b61577bbc427d256ea4ab11b0`;
+the reports pin the probes and Book evidence to that commit. Project-board
+placement remains pending. Filing reports does not accept or verify draft anchors.
 
 ## Criterion assessment
 
