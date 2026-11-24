@@ -1,4 +1,4 @@
-//! Dispatch for plugin-vended `cargo agents <name>` subcommands.
+//! Dispatch for plugin-vended `symposium <name>` subcommands.
 //!
 //! The top-level CLI declares `allow_external_subcommands = true`, any
 //! unknown subcommand is routed here. This module looks up the name across configured plugins
@@ -140,7 +140,7 @@ pub async fn dispatch_external(
         })?;
 
     let runnable = resolve_runnable(
-        acquire_installation(sym, installation, None, None, UpdateLevel::None).await?,
+        acquire_installation(sym, installation, None, None, UpdateLevel::None, None).await?,
         &format!("subcommand `{name}`"),
     )?;
 
@@ -208,6 +208,8 @@ mod tests {
             canonical: PackageId::new("test", name, ANY_VERSION),
             manifest: PluginManifest {
                 name: name.into(),
+                version: None,
+                description: None,
                 predicates: crate_set(depends_on),
                 installations: vec![],
                 hooks: vec![],
@@ -219,6 +221,8 @@ mod tests {
                 requires_use: false,
             },
             workspace_member: false,
+            agent_plugin_root: None,
+            root: std::path::PathBuf::new(),
         }
     }
 

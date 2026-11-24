@@ -20,19 +20,22 @@ On Arch Linux, install the [`symposium`](https://archlinux.org/packages/extra/x8
 pacman -S symposium
 ```
 
+Installing gives you the `symposium` command. `cargo agents` is the same command under its cargo subcommand name: it accepts the same subcommands and behaves the same way, so `symposium init` and `cargo agents init` are interchangeable. This guide uses `symposium`.
+
 ## Initialization
 
-Once you have installed Symposium, you need to run the [`init` command](./reference/cargo-agents-init.md):
+Once you have installed Symposium, you need to run the [`init` command](./reference/symposium-init.md):
 
 ```bash
-cargo agents init
+symposium init
 ```
 
-### Select your agents
+### Your agents
 
-This will prompt you to select the agents you use (Antigravity, Claude Code, Copilot, etc.) — you can pick more than one:
+This will prompt you to select the agents you use (Antigravity, Claude Code, Copilot, etc.). The ones Symposium finds installed, recognized by their config directory such as `~/.claude` or `~/.codex`, are already checked, so usually you just press Enter:
 
-```bash
+```text
+ℹ️  Detected: Codex CLI, Kiro
 Which agents do you use? (space to select, enter to confirm):
 > [ ] Antigravity CLI
   [ ] Claude Code
@@ -40,15 +43,17 @@ Which agents do you use? (space to select, enter to confirm):
   [ ] GitHub Copilot
   [ ] Goose
   [x] Kiro
-  [x] OpenCode
+  [ ] OpenCode
 ```
+
+After installing or uninstalling an agent, rerun `symposium init`: the list reflects the change, so you just confirm. You can also run `symposium init --add-agent <name>` or `--remove-agent <name>`.
 
 ### Global vs project hook registration
 
 Next, Symposium will ask you whether you want to register hooks **globally** or **per-project**:
 
 * **global** registration means Symposium will activate automatically for all Rust projects.
-* **project** registration means Symposium only activates in projects once you run [`cargo agents sync`](./reference/cargo-agents-sync.md) to add hooks to that project.
+* **project** registration means Symposium only activates in projects once you run [`symposium sync`](./reference/symposium-sync.md) to add hooks to that project.
 
 We recommend **global** registration for maximum convenience.
 
@@ -60,7 +65,7 @@ You may wish to browse the [configuration](./reference/configuration.md) page to
 
 Symposium will now install skills, MCP servers, and other extensions based on your dependencies automatically.
 
-Most plugins come from two places: the [central recommendations repository][rr], which is enabled by default, and crates your project depends on directly that ship their own. A dependency's plugin stays off until you enable it: an interactive [`cargo agents sync`](./reference/cargo-agents-sync.md#consent-prompt) asks about each one, and [`cargo agents status`](./reference/cargo-agents-status.md) lists the ones waiting for an answer. If you have a crate and would like to add a plugin for it to symposium, see the [Supporting your crate](./crate-authors/supporting-your-crate.md) page.
+Most plugins come from two places: the [central recommendations repository][rr], which is enabled by default, and crates your project depends on directly that ship their own. A dependency's plugin stays off until you enable it: an interactive [`symposium sync`](./reference/symposium-sync.md#consent-prompt) asks about each one, and [`symposium status`](./reference/symposium-status.md) lists the ones waiting for an answer. If you have a crate and would like to add a plugin for it to symposium, see the [Supporting your crate](./crate-authors/supporting-your-crate.md) page.
 
 [rr]: https://github.com/symposium-dev/recommendations
 

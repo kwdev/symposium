@@ -47,12 +47,12 @@ Each top-level key is a **hook name** mapping to its events. `PreToolUse` and
       {
         "matcher": "*",
         "hooks": [
-          { "type": "command", "command": "cargo-agents hook antigravity pre-tool-use", "timeout": 30 }
+          { "type": "command", "command": "symposium hook antigravity pre-tool-use", "timeout": 30 }
         ]
       }
     ],
     "PreInvocation": [
-      { "type": "command", "command": "cargo-agents hook antigravity user-prompt-submit", "timeout": 30 }
+      { "type": "command", "command": "symposium hook antigravity user-prompt-submit", "timeout": 30 }
     ]
   }
 }
@@ -113,6 +113,8 @@ All keys are camelCase (protojson).
 `workspacePaths` is populated once the workspace is adopted, in print mode too.
 A hook's working directory is always the directory
 holding its own `hooks.json`, never the user's project.
+Symposium therefore runs plugin hooks, and evaluates their `shell(...)` and
+relative `path_exists(...)` predicates, in `workspacePaths[0]`.
 
 ### PreToolUse / PostToolUse additions
 
@@ -186,6 +188,12 @@ Any value other than `continue` lets the agent stop.
 outcome. This differs from every other agent symposium supports, where exit 2
 blocks.
 
+A plugin hook's exit 2 is therefore delivered on stdout where Antigravity has a
+form for it: `decision: "deny"` on `PreToolUse`, and on `Stop`
+`decision: "continue"` with the hook's stderr as the `reason`
+(`AntigravityStopEvent::blocked`). `PreInvocation` and `PostToolUse` have no
+such form, so a block there has no effect.
+
 ## Skills
 
 | Scope | Path |
@@ -223,6 +231,41 @@ and a symlink of the folder itself. A separate report of symlinked skills being
 ignored concerns the IDE and `~/.gemini/antigravity/skills/`.
 
 `plugins.json` follows the same schema for plugin directories.
+
+## Plugin Delivery
+
+A plugin enabled with `use --global` reaches Antigravity as a copy of the
+compiled plugin directory in `~/.gemini/config/plugins/<plugin>/`, the global
+folder every Antigravity surface discovers and the one `agy plugin install`
+copies into. Antigravity loads it in every project as the plugin `<plugin>` and
+offers its skills as `/<plugin>:<skill>`; the directory name is the plugin's
+identity. The `$schema` and `version` fields, `.claude-plugin/` and the
+`.symposium` marker are ignored.
+
+Symposium writes no other file. Antigravity keeps its own state about the
+plugins it finds, which symposium leaves alone: `plugins.<dir>.enabled` in
+`~/.gemini/config/config.json` (a `false` hides the plugin) and
+`~/.gemini/antigravity-cli/plugin_data/<dir>/`. `agy plugin list` prints only
+Antigravity's record of its own installs, so it never shows these plugins;
+`/skills` does.
+
+Verified against agy 1.2.14 through `symposium sync`, by asking the agent
+(`/skills` in the TUI and the model request of `agy -p`):
+
+- The plugin is listed in the first session after the sync, with no bare
+  duplicate.
+- An edit at the same version reaches the next session: the copy is read in
+  place.
+- Removing the directory removes the plugin, with no error.
+- A plugin written during the `SessionStart` hook is not offered in that
+  session until `/skills reload` or a new session.
+- A per-skill copy of the same skill in the project's `.agents/skills/` is
+  listed as well, so the skill appears twice.
+
+Registering the directory by path in `~/.gemini/config/plugins.json` also loads
+it, but without the `<plugin>:` prefix and below the built-in customizations.
+A `<repo>/.agents/plugins/<plugin>/` folder loads as a project plugin, and Goose
+reads the same folder; symposium does not write project-scoped plugins.
 
 ## MCP server configuration
 

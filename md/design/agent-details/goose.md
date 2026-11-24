@@ -70,7 +70,7 @@ extensions:
   symposium:
     name: symposium
     type: stdio
-    cmd: /path/to/cargo-agents
+    cmd: /path/to/symposium
     args: [mcp]
     enabled: true
     envs:
@@ -105,7 +105,7 @@ empty value counts as unset. Symposium writes its MCP servers there too.
 Verified against Goose 1.54.0 with a different MCP server in each candidate
 file, by which one `goose run --text hi` started: the one under
 `$GOOSE_PATH_ROOT` when both variables were set, and the `XDG_CONFIG_HOME` one
-when `GOOSE_PATH_ROOT` was empty. Through `cargo agents sync` with the variable
+when `GOOSE_PATH_ROOT` was empty. Through `symposium sync` with the variable
 set, a server left in `~/.config/goose/config.yaml` never started, while the
 one symposium wrote under `$GOOSE_PATH_ROOT` started and was offered to the
 model as a tool.
@@ -118,3 +118,39 @@ cannot tell an accepted entry from a rejected one.
 
 Registration is idempotent — if the entry already exists with the correct
 values, no changes are made. Stale entries are updated in place.
+
+## Plugin Delivery
+
+A plugin enabled with `use --global` reaches Goose as a copy of the compiled
+plugin directory in `~/.agents/plugins/<plugin>/`, where `goose plugin install`
+puts the plugins it clones (`$GOOSE_PATH_ROOT/.agents/plugins/<plugin>/` when
+that variable is set; `XDG_CONFIG_HOME` moves `config.yaml` but not plugins).
+Goose loads every directory there in every project, reading the root
+`plugin.json` and the skills under `skills/`; `.claude-plugin/` and the
+`.symposium` marker are ignored.
+
+Skills keep the name their `SKILL.md` gives them: Goose adds the `<plugin>:`
+prefix only to plugins it installs itself, by rewriting each `SKILL.md`. Goose
+records each plugin directory it finds under `plugins.<absolute path>.enabled`
+in its `config.yaml`. Symposium never edits that map, so a user's `false`
+stays, and an entry left after a removal is harmless. Goose 1.55.0 also searches
+`~/.claude/skills/` two levels deep, so with Claude Code configured it loads the
+same skills from Claude Code's copy (`~/.claude/skills/<plugin>/skills/<skill>/`),
+and turning the plugin off in Goose then has no effect.
+
+Verified against Goose 1.53.0 through `symposium sync`, by asking the agent
+(`goose skills list`, and the system prompt a `goose session` sends to a local
+model endpoint):
+
+- The skill is listed from `~/.agents/plugins/<plugin>/skills/<skill>` after
+  the sync.
+- An edit at the same version reaches the next listing.
+- Removing the directory removes the skill, with no error.
+- Goose looks for plugins again on every turn, so a plugin a sync installs
+  while a session runs is offered from the next message.
+- A per-skill copy of the same skill in `.agents/skills/` is listed instead of
+  the plugin's.
+- `GOOSE_PATH_ROOT` moves the folder symposium writes and Goose reads.
+
+Goose also loads `<working directory>/.agents/plugins/<plugin>/` as a project
+plugin, with no trust prompt; symposium does not write project-scoped plugins.

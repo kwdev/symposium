@@ -14,7 +14,7 @@ This page documents the JSON schemas for symposium-format hooks — the input yo
 
 ## Agent support
 
-Symposium registers one handler per event with each agent, under the agent's own name for that event. A "not delivered" cell means Symposium registers no handler for that event on that agent. The table gives each agent's native event name; the name in parentheses is the agent's name in a hook's `format` and in `cargo agents hook <agent>`.
+Symposium registers one handler per event with each agent, under the agent's own name for that event. A "not delivered" cell means Symposium registers no handler for that event on that agent. The table gives each agent's native event name; the name in parentheses is the agent's name in a hook's `format` and in `symposium hook <agent>`.
 
 | Agent | `PreToolUse` | `PostToolUse` | `UserPromptSubmit` | `SessionStart` | `Stop` |
 |-------|--------------|---------------|--------------------|----------------|--------|
@@ -126,7 +126,7 @@ Your hook receives one of the following JSON objects on stdin, depending on whic
 
 ## Output schemas
 
-Your hook writes a JSON object to stdout. The object is wrapped in an enum tag matching the event, just like the input.
+Your hook writes a JSON object to stdout. The object is wrapped in an enum tag matching the event, just like the input. Stdout that is not one of these objects is ignored, with a warning in the log.
 
 ### `PreToolUse` output
 
@@ -201,7 +201,7 @@ Tool input is the agent's own: write `updatedInput` in the shape that agent's to
 ```json
 {
   "SessionStart": {
-    "additionalContext": "symposium 0.5.0 is available (current: 0.4.2). Run `cargo agents self-update` to upgrade."
+    "additionalContext": "symposium 0.5.0 is available (current: 0.4.2). Run `symposium self-update` to upgrade."
   }
 }
 ```
@@ -224,13 +224,16 @@ Tool input is the agent's own: write `updatedInput` in the shape that agent's to
 |-------|------|-------------|
 | `additionalContext` | string or null | Text for the agent when the turn ends. Only Antigravity, Claude Code and Codex run `Stop` hooks, and none treats this as plain context: Claude Code and Codex ignore it, while Antigravity takes it as a reason to keep going and starts another turn. |
 
+To keep the agent going on all three, exit 2 with the reason on stderr (see [exit codes](#exit-codes)).
+
 ## Exit codes
 
 | Code | Meaning |
 |------|---------|
 | `0` | Success. Stdout is parsed as JSON and merged into the hook result. |
-| `2` | Block. The action is blocked and stderr is returned to the agent as the reason. On `PreToolUse` this is a `"deny"` decision, delivered to each agent as in the table above. On other events `cargo agents hook` exits 2 with the reason on stderr, and the agent applies its own semantics (Claude Code, for instance, erases a blocked prompt). |
+| `2` | Block. The action is blocked and stderr is returned to the agent as the reason. On `PreToolUse` this is a `"deny"` decision, delivered to each agent as in the table above. On `Stop` the agent continues the turn with the reason: Claude Code and Codex read it from exit 2, and Antigravity, which ignores exit codes, receives `decision: "continue"` on stdout. On other events `symposium hook` exits 2 with the reason on stderr, and the agent applies its own semantics (Claude Code, for instance, erases a blocked prompt). |
 | Other non-zero | Warning. The hook is considered to have succeeded for dispatch purposes; stdout is still parsed if possible. |
+| Timed out | Warning. A hook still running after 5 seconds, or once all plugin hooks of the event have run for 8 seconds together (preparing their commands included), is killed with the commands it started. Its output is ignored, the call is not blocked, and the next hook still runs. |
 
 ## Matcher
 
@@ -249,11 +252,11 @@ echo '{"PreToolUse":{"tool_name":"Bash","tool_input":{"command":"rm -rf /"},"ses
   | sh scripts/check.sh
 ```
 
-To test end to end, pipe the agent's own native JSON into [`cargo agents hook <agent> <event>`](./cargo-agents-hook.md), where `<agent>` is one of `antigravity`, `claude`, `codex`, `copilot`, or `kiro` and `<event>` is `pre-tool-use`, `post-tool-use`, `user-prompt-submit`, `session-start`, or `stop`. For Claude Code:
+To test end to end, pipe the agent's own native JSON into [`symposium hook <agent> <event>`](./symposium-hook.md), where `<agent>` is one of `antigravity`, `claude`, `codex`, `copilot`, or `kiro` and `<event>` is `pre-tool-use`, `post-tool-use`, `user-prompt-submit`, `session-start`, or `stop`. For Claude Code:
 
 ```bash
 echo '{"session_id":"s","cwd":"/path/to/project","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cargo test"}}' \
-  | cargo agents hook claude pre-tool-use
+  | symposium hook claude pre-tool-use
 ```
 
 This runs the full dispatch, including the automatic sync when `auto-sync` is on, for the workspace at `cwd`, so the plugin must be installed and active there. Symposium converts the payload to canonical JSON for your hook and prints the result in the agent's format (for Claude Code, a `hookSpecificOutput` object). There is no `symposium` agent name: the canonical format is only what your handler sees.

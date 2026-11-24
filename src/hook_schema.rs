@@ -75,6 +75,13 @@ pub trait AgentHookOutput: Debug {
     /// Convert this output into a JSON value to return to the agent.
     fn to_hook_output(&self) -> serde_json::Value;
 
+    fn blocks(&self) -> bool {
+        matches!(
+            self.to_symposium(),
+            symposium::OutputEvent::PreToolUse(o) if o.decision == symposium_sdk::hook::Decision::Deny
+        )
+    }
+
     fn into_any(self: Box<Self>) -> Box<dyn Any>;
 }
 
@@ -112,9 +119,17 @@ pub trait AgentHookEvent {
     fn respond(&self, output: &serde_json::Value) -> HookResponse {
         HookResponse::success(self.serialize_output(output))
     }
+
+    fn blocked(&self, reason: &str) -> HookResponse {
+        HookResponse::blocked(reason)
+    }
+
+    fn merge_output(&self, acc: &mut serde_json::Value, next: serde_json::Value) {
+        crate::hook::merge(acc, next)
+    }
 }
 
-/// What `cargo agents hook` hands back to the agent. Most agents read the
+/// What `symposium hook` hands back to the agent. Most agents read the
 /// result from stdout, but blocking can hinge on the exit code, so the
 /// response carries all three.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -169,6 +184,10 @@ pub trait ErasedAgentHookEvent {
     /// The response for the final accumulated output (as JSON Value).
     /// Most agents take JSON on stdout; Kiro takes plain text, and exit 2 to deny.
     fn respond(&self, output: &serde_json::Value) -> HookResponse;
+
+    fn blocked(&self, reason: &str) -> HookResponse;
+
+    fn merge_output(&self, acc: &mut serde_json::Value, next: serde_json::Value);
 }
 
 struct ErasedAgentHookEventImpl<E: AgentHookEvent + 'static>(E);
@@ -198,6 +217,14 @@ where
 
     fn respond(&self, output: &serde_json::Value) -> HookResponse {
         self.0.respond(output)
+    }
+
+    fn blocked(&self, reason: &str) -> HookResponse {
+        self.0.blocked(reason)
+    }
+
+    fn merge_output(&self, acc: &mut serde_json::Value, next: serde_json::Value) {
+        self.0.merge_output(acc, next)
     }
 }
 

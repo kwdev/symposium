@@ -1,8 +1,8 @@
 # Configuration
 
-`cargo agents` uses a single user-wide configuration file at `~/.symposium/config.toml`. Created by `cargo agents init`.
+`symposium` uses a single user-wide configuration file at `~/.symposium/config.toml`. Created by `symposium init`.
 
-If the file cannot be read or parsed, `cargo agents` prints a warning and runs with the defaults and `auto-update` off. Commands that would save the configuration, such as `init` or `use`, stop with an error instead of overwriting it, so fix or remove the file and run them again. `sync` stops too, rather than treating every agent as removed.
+If the file cannot be read or parsed, `symposium` prints a warning and runs with the defaults and `auto-update` off. Commands that would save the configuration, such as `init` or `use`, stop with an error instead of overwriting it, so fix or remove the file and run them again. `sync` stops too, rather than treating every agent as removed.
 
 ## Full example
 
@@ -23,6 +23,7 @@ level = "info"
 
 [defaults]
 symposium-recommendations = true
+symposium-audits = false
 user-plugins = true
 
 [[registry]]
@@ -38,7 +39,7 @@ path = "my-plugins"
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `auto-sync` | bool | `true` | Automatically run `cargo agents sync` during hook invocations. When enabled, skills are kept in sync with workspace dependencies without manual intervention. |
+| `auto-sync` | bool | `true` | Automatically run `symposium sync` during hook invocations. When enabled, skills are kept in sync with workspace dependencies without manual intervention. |
 | `agents-syncing` | bool | `true` | Include each workspace plugin's `.agents/skills/` default skill group, so skills you author there install into every configured agent's skill directory (such as `.claude/skills/` or `.kiro/skills/`). Skills that symposium itself installed — identified by the `.symposium` marker file — are never treated as sources. See [Workspace skills](../workspace-skills.md) for the user-guide overview, or [Agents syncing](#agents-syncing-mirror-user-authored-skills) below for details. |
 | `hook-scope` | string | `"global"` | Where agent hooks are installed. `"global"` writes to the user's home directory (e.g., `~/`). `"project"` writes to the project directory, keeping hooks local to the workspace. |
 | `auto-update` | string | `"on"` | Controls automatic update behavior. `"off"` disables update checks entirely. `"warn"` checks the registry (at most once per 24 hours) and prints a message when a newer version is available. `"on"` automatically installs the update via `cargo install` and re-executes the command with the new binary. |
@@ -58,7 +59,7 @@ Skills you author in `.agents/skills/` therefore flow through the same pipeline 
 Two `.symposium`-marker rules keep sources and copies distinct (symposium never writes a marker into a source, only into directories it installs):
 
 - Skill discovery skips marker-bearing directories, so copies symposium installed into `.agents/skills/` (for agents that read it natively) are never re-discovered as sources.
-- For an agent whose skill directory *is* `.agents/skills/`, a skill whose source already sits at its install slot is left in place — nothing is copied.
+- For an agent that reads `.agents/skills/` (every agent but Claude Code and Kiro), a skill whose source already sits there is left in place: nothing is copied.
 
 Installed copies receive the same marker and `*` `.gitignore` that plugin-installed skills get, which means: updates to the source are re-copied on each sync; removing the source removes the copies on the next sync (the normal stale-skill reap); disabling `agents-syncing = false` does the same; and a pre-existing user-managed directory in a target is never overwritten (the skill installs under a suffixed name instead).
 
@@ -68,7 +69,7 @@ Because these are real skills now, `SKILL.md` frontmatter must carry `name` and 
 
 Registering hooks globally ensures that Symposium activates whenever you use the selected agent, which means that it will work in any Rust project automatically.
 
-Registering hooks at the project level requires you to run `cargo agents sync` within each project at least once to create the hooks. After that, the `auto-sync` feature will keep you up-to-date.
+Registering hooks at the project level requires you to run `symposium sync` within each project at least once to create the hooks. After that, the `auto-sync` feature will keep you up-to-date.
 
 ## `[[agent]]`
 
@@ -89,13 +90,13 @@ Each `[[agent]]` entry identifies an agent you use. You can configure multiple a
 Opt-in, per-user usage telemetry. Off by default. When enabled, Symposium
 appends anonymous events as JSON lines to a local, per-day log under
 `~/.symposium/telemetry/`. **Nothing is uploaded automatically** — you inspect
-and share the data yourself with `cargo agents telemetry show`. The preference
-is also collected during `cargo agents init`. See the
+and share the data yourself with `symposium telemetry show`. The preference
+is also collected during `symposium init`. See the
 [telemetry design chapter](../design/telemetry.md) for the event format.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `enabled` | bool | `false` | Record anonymous usage events (session starts, prompts, tool usage — counts and metadata only, no prompt or command content). Toggle with `cargo agents telemetry enable` / `disable`. |
+| `enabled` | bool | `false` | Record anonymous usage events (session starts, prompts, tool usage; counts and metadata only, no prompt or command content). Toggle with `symposium telemetry enable` / `disable`. |
 
 ```toml
 [telemetry]
@@ -104,11 +105,12 @@ enabled = true
 
 ## `[defaults]`
 
-Controls the two built-in registries. Both are enabled by default.
+Controls the built-in sources: two registries and the audits list. All are enabled by default except `symposium-audits`.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `symposium-recommendations` | bool | `true` | Fetch plugins from the [symposium-dev/recommendations](https://github.com/symposium-dev/recommendations) repository. |
+| `symposium-audits` | bool | `false` | Fetch the community [audits](./audits.md) list from the [symposium-dev/audits](https://github.com/symposium-dev/audits) repository: which dependency plugin payloads were audited, and which releases are revoked and never load. It is not a registry: nothing in it loads as a plugin. It is refreshed alongside the git registries, and a list that cannot be fetched only means every lookup answers "not audited"; it never holds back cleanup the way an unreachable registry does. Off until the community list exists; set it to `true` to turn it on. |
 | `user-plugins` | bool | `true` | Scan `~/.symposium/plugins/` for user-defined plugins. |
 
 ## `[[registry]]`
@@ -137,7 +139,7 @@ The `cargo` package manager is built in and needs no entry. An entry named `carg
 ```toml
 [[package-manager]]
 name = "cargo"
-command = "symposium-pm-cargo"   # installed alongside `cargo-agents`
+command = "symposium-pm-cargo"   # installed alongside `symposium`
 ```
 
 | Key | Type | Default | Description |
@@ -161,8 +163,8 @@ Trust follows whoever supplies the *content*, not the package the content is abo
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `auto-enable` | array of strings | `[]` | Dependency names whose embedded plugins load without being asked about. `"*"` pre-consents to every dependency. |
-| `use` | array | `[]` | Plugins enabled deliberately. Each entry is either a plain name (enabled in every workspace) or `{ name = "...", workspace = "/path" }` (enabled only while working in that workspace root). |
-| `disable` | array of strings | `[]` | Names that must never be enabled. Takes precedence over `auto-enable`, including over `"*"`. |
+| `use` | array | `[]` | Plugins enabled deliberately. Each entry is either a plain name (enabled in every workspace, and installed for you as a plugin directory on the agents that support it) or `{ name = "...", workspace = "/path" }` (enabled only while working in that workspace root). |
+| `disable` | array of strings | `[]` | Names that must never be enabled. Takes precedence over `auto-enable`, including over `"*"`. A crate that is both disabled and [revoked](./audits.md#revocations) counts as declined. |
 
 Each name is matched by the package manager its package comes from: a crate name the way cargo matches it, hyphen/underscore-insensitively (`widget-lib` and `widget_lib` are the same entry), and a registry plugin's name exactly. A `use` name that names both a registry plugin and a crate (a dependency or one on crates.io) means the registry plugin only, so it does not also consent to that crate's embedded plugin, and a `use` name no package manager has enables nothing.
 
@@ -175,7 +177,7 @@ use = ["standalone-plugin", { name = "team-tools", workspace = "/home/me/work/se
 
 `use` is what wakes a dormant plugin, and it also enables a plugin whether or not any dependency references it. `auto-enable` is narrower: it is consent for what a dependency you already have carries with it.
 
-You rarely edit this section by hand. [`cargo agents use`](./cargo-agents-use.md) writes and removes `use` entries; the [consent prompt](./cargo-agents-sync.md#consent-prompt) in an interactive `cargo agents sync` writes `auto-enable` and `disable`; and [`cargo agents status`](./cargo-agents-status.md) reports what the section currently decides.
+You rarely edit this section by hand. [`symposium use`](./symposium-use.md) writes and removes `use` entries; the [consent prompt](./symposium-sync.md#consent-prompt) in an interactive `symposium sync` writes `auto-enable` and `disable`; and [`symposium status`](./symposium-status.md) reports what the section currently decides.
 
 ## Directory resolution
 
@@ -187,7 +189,7 @@ User-wide data lives under `~/.symposium/` by default. Override with environment
 | XDG | `$XDG_CONFIG_HOME/symposium/` | `$XDG_CACHE_HOME/symposium/` | `$XDG_STATE_HOME/symposium/logs/` |
 | Default | `~/.symposium/` | `~/.symposium/cache/` | `~/.symposium/logs/` |
 
-`SYMPOSIUM_HOME` takes precedence over XDG variables. An empty variable counts as unset, and so does a relative `XDG_*` value.
+`SYMPOSIUM_HOME` takes precedence over XDG variables. An empty variable counts as unset, and so does a relative `XDG_*` value. A relative `SYMPOSIUM_HOME` is resolved once, against the directory `symposium` started in.
 
 ## File locations
 
@@ -197,5 +199,6 @@ User-wide data lives under `~/.symposium/` by default. Override with environment
 | `~/.symposium/state.toml` | Persistent state (binary version stamp, last update check) |
 | `~/.symposium/telemetry/` | Telemetry event log, one JSONL file per day (created when `[telemetry] enabled = true` and events are recorded) |
 | `~/.symposium/plugins/` | User-defined plugins |
+| `~/.symposium/installed/` | Plugins enabled with `use --global`, compiled for the agents to install |
 | `~/.symposium/cache/` | Cache directory (crate sources, plugin sources) |
 | `~/.symposium/logs/` | Log files (one per invocation, timestamped) |

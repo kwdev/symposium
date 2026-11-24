@@ -12,6 +12,16 @@ what symposium writes applies to all of them.
 |-------|------|
 | Project | `.agents/skills/<name>/SKILL.md` |
 
+## Plugins
+
+A plugin enabled with `symposium use --global` is installed for you as a plugin directory:
+
+| Scope | Path |
+|-------|------|
+| Global | `~/.gemini/config/plugins/<plugin>/` |
+
+Antigravity loads it in every project, and its skills are invoked as `/<plugin>:<skill>`. Symposium writes no settings for it, so turning the plugin off in Antigravity stays in effect. A plugin installed while a session runs appears in the next session, or after `/skills reload`.
+
 ## Hooks
 
 Symposium merges a single named entry, `symposium`, into Antigravity's
@@ -27,10 +37,13 @@ Events registered: `PreToolUse`, `PostToolUse`, `PreInvocation`, `SessionStart`,
 `Stop`.
 
 Output format: JSON. Timeouts are in **seconds** (30 by default). Exit codes are
-ignored — only what a hook writes to stdout affects the agent. Context reaches the
-model at session start and on the first `PreInvocation` of a turn; after a tool
-call it does not (`PostToolUse` output carries nothing back), and on `PreToolUse`
-only a denial's reason is shown.
+ignored: only what a hook writes to stdout affects the agent. So when a plugin
+hook blocks by exiting 2, symposium writes the block to stdout: a denial on
+`PreToolUse`, and on `Stop` a `continue` decision, which starts another turn
+with the hook's stderr as the reason. Context reaches the model at session start
+and on the first `PreInvocation` of a turn; after a tool call it does not
+(`PostToolUse` output carries nothing back), and on `PreToolUse` only a denial's
+reason is shown.
 
 **Caveat:** `PreInvocation` stands in for symposium's `user-prompt-submit`
 because Antigravity has no prompt event. It fires before *every* model call, so

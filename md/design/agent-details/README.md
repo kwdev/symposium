@@ -7,10 +7,10 @@
 
 For each agent it supports, symposium needs to know:
 
-1. **Hook registration** — where and how to write config so the agent calls `cargo-agents hook`
-2. **Hook I/O protocol** — event names, input/output field names, exit code semantics
-3. **Extension installation** — where skill files go (project and global)
-4. **Custom instructions** — where the agent reads project-level instructions
+1. **Hook registration**: where and how to write config so the agent calls `symposium hook`
+2. **Hook I/O protocol**: event names, input/output field names, exit code semantics
+3. **Extension installation**: where skill files go (project and global)
+4. **Custom instructions**: where the agent reads project-level instructions
 
 The tables below summarize the answers for each agent. Individual agent pages contain the full reference. A **?** indicates information we have not yet documented.
 
@@ -49,6 +49,8 @@ The tables below summarize the answers for each agent. Individual agent pages co
 | Kiro | 30,000 | milliseconds (`timeout_ms`) |
 | OpenCode | 60,000 | milliseconds (community hooks plugin) |
 | Goose | N/A | N/A |
+
+Symposium registers 10 seconds for Codex and Copilot and 30 for Antigravity, and leaves the others at their defaults. Plugin hooks run inside that budget, limited to 5 seconds each and 8 together (see [the hook flow](../hook-flow.md)).
 
 ## Event names
 
@@ -125,10 +127,10 @@ All shell-based agents use the same convention (where applicable):
 | GitHub Copilot | `.agents/skills/<name>/SKILL.md` | *(none)* |
 | Codex CLI | `.agents/skills/<name>/SKILL.md` | `~/.agents/skills/<name>/SKILL.md` |
 | Kiro | `.kiro/skills/<name>/SKILL.md` | `~/.kiro/skills/<name>/SKILL.md` |
-| OpenCode | `.agents/skills/<name>/SKILL.md` | `~/.agents/skills/<name>/SKILL.md` |
+| OpenCode | `.opencode/skills/<name>/SKILL.md` | `~/.agents/skills/<name>/SKILL.md` |
 | Goose | *(N/A — uses MCP extensions)* | *(N/A)* |
 
-Symposium uses the vendor-neutral `.agents/skills/` path whenever the agent supports it, falling back to agent-specific paths (e.g., `.claude/skills/`, `.kiro/skills/`) when required. Codex CLI and OpenCode also support `.agents/skills/` natively.
+Symposium uses the vendor-neutral `.agents/skills/` path whenever the agent supports it, falling back to agent-specific paths (e.g., `.claude/skills/`, `.kiro/skills/`) when required. Codex CLI and OpenCode also support `.agents/skills/` natively; OpenCode still gets `.opencode/skills/`, so that an agent taking a plugin does not also find OpenCode's per-skill copies of its skills (see [OpenCode](./opencode.md#skills)).
 
 ### Custom instructions
 
@@ -193,3 +195,7 @@ Notes that cost real debugging time:
   and replaced the link with a regular file, so `save_json` resolves the link
   and uses the target’s Unix permissions from the moment the temp file is created.
   New configs retain the normal `0666` creation mode filtered by the process umask.
+- A user can switch one of symposium's entries off without removing it, and
+  sync, which also runs on hook events, keeps that choice while it brings the
+  rest of the entry up to date: `enabled: false` on an OpenCode or Goose MCP
+  entry, and on Antigravity's named `symposium` hook.

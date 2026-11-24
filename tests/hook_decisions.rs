@@ -124,6 +124,25 @@ async fn plugin_exit_2_denies_the_tool_call_on_every_agent() {
     .unwrap();
 }
 
+/// Any exit code other than 2 still has its stdout read, so a hook that
+/// prints a denial and then fails keeps its denial.
+#[tokio::test(flavor = "multi_thread")]
+async fn plugin_deny_survives_a_non_zero_exit() {
+    with_fixture(
+        TestMode::SimulationOnly,
+        &["plugin-hook-decisions0"],
+        async |ctx| {
+            for agent in ALL_AGENTS {
+                let response = respond(&ctx, agent, tool_call("DenyExitOneProbe")).await;
+                assert_denied(agent, &response, DENY_REASON);
+            }
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}
+
 /// A rewrite reaches every agent that can apply it without approving the
 /// call on the user's behalf: Claude gets `ask`, so the user sees the
 /// rewritten call. Codex (allow-only) and Kiro (no rewrite) leave the call
@@ -164,6 +183,32 @@ async fn plugin_rewrite_reaches_agents_that_can_apply_it() {
     .unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn portable_output_that_is_not_canonical_is_ignored() {
+    with_fixture(
+        TestMode::SimulationOnly,
+        &["plugin-hook-decisions0"],
+        async |ctx| {
+            for agent in ALL_AGENTS {
+                let response = respond(&ctx, agent, tool_call("NullDecisionProbe")).await;
+                assert_eq!(response.exit_code, 0, "{agent:?} exit code");
+                let expected = match agent {
+                    HookAgent::Kiro => {
+                        assert!(response.stdout.is_empty(), "Kiro stdout");
+                        continue;
+                    }
+                    HookAgent::Antigravity => json!({"decision": "allow"}),
+                    _ => json!({}),
+                };
+                assert_eq!(stdout_json(&response), expected, "{agent:?} output");
+            }
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}
+
 /// Outside a tool call, exit 2 passes through with its reason, and each agent
 /// applies its own blocking semantics (Claude erases the prompt, for one).
 #[tokio::test(flavor = "multi_thread")]
@@ -186,7 +231,7 @@ async fn plugin_exit_2_on_a_prompt_passes_through() {
 }
 
 /// The exit code and stderr are what the agent actually sees, so check them on
-/// the real `cargo agents hook` process, not just the in-process pipeline.
+/// the real `symposium hook` process, not just the in-process pipeline.
 #[tokio::test(flavor = "multi_thread")]
 async fn hook_command_exits_2_with_the_reason_on_stderr() {
     with_fixture(
@@ -237,7 +282,7 @@ fn run_hook_command(
 ) -> std::process::Output {
     use std::io::Write;
 
-    let binary = std::env::var("CARGO_BIN_EXE_cargo-agents").expect("must run via cargo test");
+    let binary = std::env::var("CARGO_BIN_EXE_symposium").expect("must run via cargo test");
     let mut child = std::process::Command::new(binary)
         .args(["hook", agent.as_str(), event_arg])
         .env("SYMPOSIUM_HOME", ctx.sym.config_dir())
@@ -246,7 +291,7 @@ fn run_hook_command(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .expect("spawn cargo-agents");
+        .expect("spawn symposium");
     child
         .stdin
         .take()

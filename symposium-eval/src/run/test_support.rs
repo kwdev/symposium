@@ -5,9 +5,9 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 
-use super::{ApiKey, Batch, Configuration, Machine, Trial};
+use super::{ApiKey, Batch, Configuration, Inputs, Machine, Trial};
 use crate::evals::Evals;
-use crate::task::{BatchName, Task, TaskName};
+use crate::task::{BatchName, TaskName};
 
 /// A canonical scratch directory holding `home/`, `checkout/evals/`, and a toolchain
 /// under the home, as rustup installs one.
@@ -56,16 +56,25 @@ impl Host {
     }
 }
 
-pub(crate) fn store_durability() -> (Evals, Task) {
-    let evals = Evals::in_repository();
-    let task = Task::load(&evals, &TaskName::new("store-durability").unwrap()).unwrap();
-    (evals, task)
+/// `batch`'s copy of the repository's task `name`, taken on first use and reused after,
+/// so a test can create several trials in one batch.
+pub(crate) fn inputs(batch: &Batch, name: &str) -> Inputs {
+    let name = TaskName::new(name).unwrap();
+    if batch.inputs().exists() {
+        Inputs::reopen(batch, &name).unwrap()
+    } else {
+        batch.snapshot(&Evals::in_repository(), &name).unwrap()
+    }
+}
+
+/// `batch`'s copy of `store-durability`.
+pub(crate) fn store_durability(batch: &Batch) -> Inputs {
+    inputs(batch, "store-durability")
 }
 
 pub(crate) fn trial(batch: &Batch, number: usize, configuration: Configuration) -> Trial {
-    let (evals, task) = store_durability();
     batch
-        .create_trial(number, configuration, &evals, &task)
+        .create_trial(number, configuration, &store_durability(batch))
         .unwrap()
 }
 
@@ -84,7 +93,7 @@ pub(crate) struct RealSrt {
     batch: Batch,
     api_key: ApiKey,
     _eval_root: TempDir,
-    /// A home with a shell profile and an installed `cargo-agents`, denied like every
+    /// A home with a shell profile and an installed `symposium`, denied like every
     /// user's, so the boundary is checked against files that are surely there.
     decoy_home: TempDir,
 }
@@ -92,19 +101,27 @@ pub(crate) struct RealSrt {
 #[cfg(target_os = "linux")]
 impl RealSrt {
     pub(crate) fn new(api_key: ApiKey) -> Self {
+        Self::nested(api_key, std::path::Path::new(""))
+    }
+
+    /// As [`Self::new`], with the evaluation root at `under` inside its temporary
+    /// directory, so a test can make the root's path as long as it needs.
+    pub(crate) fn nested(api_key: ApiKey, under: &std::path::Path) -> Self {
         let srt = installed_srt();
         let decoy_home = decoy_home();
         let machine =
             Machine::new(vec![decoy_home.path().to_owned()], &checkout(), &sysroot()).unwrap();
-        let eval_root = TempDir::new().unwrap();
-        srt.preflight(eval_root.path()).unwrap();
-        let batch = Batch::create(eval_root.path(), &BatchName::new("batch").unwrap()).unwrap();
+        let temp = TempDir::new().unwrap();
+        let eval_root = temp.path().join(under);
+        fs::create_dir_all(&eval_root).unwrap();
+        srt.preflight(&eval_root).unwrap();
+        let batch = Batch::create(&eval_root, &BatchName::new("batch").unwrap()).unwrap();
         Self {
             srt,
             machine,
             batch,
             api_key,
-            _eval_root: eval_root,
+            _eval_root: temp,
             decoy_home,
         }
     }
@@ -149,9 +166,30 @@ impl RealSrt {
         tool: &super::stage::Tool,
         audience: super::stage::Audience,
     ) -> PathBuf {
+        self.stage_tool(name, tool, audience).command().to_owned()
+    }
+
+    /// As [`Self::stage`], returning what was staged.
+    pub(crate) fn stage_tool(
+        &mut self,
+        name: &str,
+        tool: &super::stage::Tool,
+        audience: super::stage::Audience,
+    ) -> super::stage::StagedTool {
         let name = crate::task::ToolName::new(name).unwrap();
-        let staged = self.batch.stage(name, tool, audience).unwrap();
-        staged.command().to_owned()
+        self.batch.stage(name, tool, audience).unwrap()
+    }
+
+    pub(crate) fn srt(&self) -> &super::srt::Srt {
+        &self.srt
+    }
+
+    pub(crate) fn machine(&self) -> &Machine {
+        &self.machine
+    }
+
+    pub(crate) fn api_key(&self) -> &ApiKey {
+        &self.api_key
     }
 
     pub(crate) fn decoy_home(&self) -> &std::path::Path {
@@ -174,17 +212,36 @@ impl RealSrt {
         number: usize,
         configuration: Configuration,
     ) -> Trial {
-        let evals = Evals::in_repository();
-        let task = Task::load(&evals, name).unwrap();
         let trial = self
             .batch
-            .create_trial(number, configuration, &evals, &task)
+            .create_trial(number, configuration, &inputs(&self.batch, name.as_str()))
             .unwrap();
         let policy =
             super::Policy::for_trial(&trial, &self.machine, "api.example.com", &self.api_key)
                 .unwrap();
         trial.write_policy(&policy).unwrap();
         trial
+    }
+
+    /// Grades `submission` as `trial` of task `name`, as a batch does: under real `srt`
+    /// with the grading policy.
+    pub(crate) fn grade(
+        &self,
+        trial: &Trial,
+        name: &str,
+        submission: &std::path::Path,
+    ) -> crate::grade::Grading {
+        let dirs = trial.prepare_grading(&self.machine).unwrap();
+        let backend = self.srt.for_grading(trial).unwrap();
+        let inputs = inputs(&self.batch, name);
+        crate::grade::grade(
+            inputs.evals(),
+            inputs.task(),
+            crate::grade::Submitted::trial(submission, &[]),
+            &backend,
+            &crate::grade::GradeLimits::default(),
+            &dirs,
+        )
     }
 
     /// Runs a command against a local test API, trusting only its additional test CA.
@@ -268,7 +325,7 @@ impl RealSrt {
         self.run_claude_hook(trial, "Stop", "stop", fields)
     }
 
-    /// Runs `cargo-agents hook claude <command>` in the project with the payload Claude
+    /// Runs `symposium hook claude <command>` in the project with the payload Claude
     /// Code sends for `event`: what it sends every hook, and `fields`.
     fn run_claude_hook(
         &self,
@@ -289,7 +346,7 @@ impl RealSrt {
             .extend(fields.as_object().unwrap().clone());
         self.run(
             trial,
-            &format!(r#"printf '%s' "$1" | cargo-agents hook claude {command}"#),
+            &format!(r#"printf '%s' "$1" | symposium hook claude {command}"#),
             &[payload.to_string().into()],
             std::time::Duration::from_secs(60),
         )
@@ -307,10 +364,8 @@ fn installed_srt() -> super::srt::Srt {
 /// The first file called `name` in a directory on `PATH`.
 #[cfg(target_os = "linux")]
 pub(crate) fn on_path(name: &str) -> PathBuf {
-    std::env::split_paths(&std::env::var_os("PATH").unwrap())
-        .map(|dir| dir.join(name))
-        .find(|path| path.is_file())
-        .unwrap_or_else(|| panic!("`{name}` is not on PATH"))
+    let path = std::env::var_os("PATH").unwrap();
+    crate::command::host::on_path(&path, name).unwrap_or_else(|| panic!("`{name}` is not on PATH"))
 }
 
 /// The active toolchain's sysroot, as `rustc` reports it.
@@ -323,7 +378,7 @@ fn sysroot() -> PathBuf {
     PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
 }
 
-/// A home holding a shell profile and an installed `cargo-agents`, which a trial must
+/// A home holding a shell profile and an installed `symposium`, which a trial must
 /// not read or run.
 #[cfg(target_os = "linux")]
 fn decoy_home() -> TempDir {
@@ -331,10 +386,24 @@ fn decoy_home() -> TempDir {
     fs::write(home.path().join(".bashrc"), "export DECOY=1\n").unwrap();
     // A name `sh` would need quoted, which reaches the script as an argument.
     fs::write(home.path().join("it's private"), "decoy\n").unwrap();
-    let installed = home.path().join(".cargo/bin/cargo-agents");
+    let installed = home.path().join(".cargo/bin/symposium");
     fs::create_dir_all(installed.parent().unwrap()).unwrap();
-    executable(&installed, "#!/bin/sh\necho 'installed cargo-agents'\n");
+    executable(&installed, "#!/bin/sh\necho 'installed symposium'\n");
     home
+}
+
+/// Waits up to a minute for a sandboxed command to create the file at `path`.
+#[cfg(target_os = "linux")]
+pub(crate) fn wait_for(path: &std::path::Path) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !path.is_file() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "never created {}",
+            path.display()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }
 
 /// Writes an executable shell script at `path`.
@@ -346,16 +415,16 @@ pub(crate) fn executable(path: &std::path::Path, script: &str) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-/// The `cargo-agents` under evaluation: built from this checkout, at the path Cargo
+/// The `symposium` under evaluation: built from this checkout, at the path Cargo
 /// reports, wherever its target directory is. Built once per test run.
 #[cfg(target_os = "linux")]
-pub(crate) fn built_cargo_agents() -> PathBuf {
+pub(crate) fn built_symposium() -> PathBuf {
     static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    BUILT.get_or_init(build_cargo_agents).clone()
+    BUILT.get_or_init(build_symposium).clone()
 }
 
 #[cfg(target_os = "linux")]
-fn build_cargo_agents() -> PathBuf {
+fn build_symposium() -> PathBuf {
     let output = std::process::Command::new(env!("CARGO"))
         .args([
             "build",
@@ -364,7 +433,7 @@ fn build_cargo_agents() -> PathBuf {
             "--package",
             "symposium",
             "--bin",
-            "cargo-agents",
+            "symposium",
         ])
         .arg("--message-format=json-render-diagnostics")
         .current_dir(checkout())
@@ -372,16 +441,16 @@ fn build_cargo_agents() -> PathBuf {
         .unwrap();
     assert!(
         output.status.success(),
-        "cannot build cargo-agents: {}",
+        "cannot build symposium: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout)
         .unwrap()
         .lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .find(|message| message["target"]["name"] == "cargo-agents")
-        .and_then(|message| message["executable"].as_str().map(PathBuf::from))
-        .expect("Cargo reports the cargo-agents executable")
+        .filter(|message| message["target"]["name"] == "symposium")
+        .find_map(|message| message["executable"].as_str().map(PathBuf::from))
+        .expect("Cargo reports the symposium executable")
 }
 
 /// The Symposium checkout this crate is built from.

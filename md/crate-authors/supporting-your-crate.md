@@ -5,9 +5,13 @@ If you maintain a Rust crate, you can extend Symposium with skills, MCP servers,
 
 ## Embed skills in your crate
 
-The recommended approach is to ship skills directly in your crate's source tree. Add a `skills/` directory with `SKILL.md` files and publish your crate. Users who depend on it directly are asked whether to enable its plugin when they run `cargo agents sync`, and then get guidance that matches the exact version of your crate they're using.
+The recommended approach is to ship skills directly in your crate's source tree. Add a `skills/` directory with `SKILL.md` files and publish your crate. Users who depend on it directly are asked whether to enable its plugin when they run `symposium sync`, and then get guidance that matches the exact version of your crate they're using.
 
 See [Authoring a plugin](./authoring-a-plugin.md) for the full walkthrough.
+
+## Ship an Agent Plugins package
+
+A crate whose root holds an [Agent Plugins](../reference/agent-plugins.md) `plugin.json` next to its `skills/` folder is read as that package, so skills you already ship for agents that read the format need nothing else.
 
 ## Skill layout metadata
 
@@ -29,6 +33,8 @@ If you ship *both* a `[package.metadata.symposium]` block and a `Symposium.toml`
 2. **Opt out of the default group**: `[package.metadata.symposium.defaults] skills = false` and declare no skill groups: no skills from this crate.
 3. **`source.path` groups**: look in that subdirectory of your crate's source, in addition to the default `skills/` group unless you opt out of it.
 4. **`[[package.metadata.symposium.plugins]]` chained references**: load another crate's plugin (see [Delegating to another crate](#delegating-to-another-crate)).
+
+Rule 1 does not apply to a crate with a `plugin.json` at its root: that crate is an [Agent Plugins package](#ship-an-agent-plugins-package).
 
 ### Delegating to another crate
 
@@ -66,6 +72,6 @@ Beyond skills, there are three more extension types you can publish through a pl
 
 - **Hooks**: checks and transformations that run when the AI performs certain actions, like writing code or running commands.
 - **MCP servers**: tools and resources exposed to agents via the Model Context Protocol.
-- **Subcommands**: your crate's own command-line tool, which agents and users run as `cargo agents my-crate <command>`.
+- **Subcommands**: your crate's own command-line tool, which agents and users run as `symposium my-crate <command>`.
 
 See [Authoring a plugin](./authoring-a-plugin.md) for how to set one up.

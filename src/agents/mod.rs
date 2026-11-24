@@ -5,6 +5,11 @@
 //! that knowledge.
 
 mod mcp_server_registration;
+mod plugin_registration;
+
+pub(crate) use plugin_registration::sync_marketplace_index;
+
+pub(crate) use mcp_server_registration::server_name as mcp_server_name;
 
 use std::fs;
 use std::io::Write as _;
@@ -15,6 +20,66 @@ use serde_json::json;
 
 use crate::config::Symposium;
 use crate::output::{Output, display_path};
+
+const HOOK_COMMAND: &str = "symposium hook";
+
+/// What `init` wrote before the `symposium` binary existed. `cargo-agents` is
+/// still installed, so such an entry keeps firing: registration rewrites it
+/// and unregistration removes it, or every event would run symposium twice.
+const LEGACY_HOOK_COMMAND: &str = "cargo-agents hook";
+
+fn is_symposium_hook(command: &str) -> bool {
+    command.starts_with(HOOK_COMMAND) || command.starts_with(LEGACY_HOOK_COMMAND)
+}
+
+/// `None` when `entry[key]` is not a symposium hook command, otherwise whether
+/// a legacy command was rewritten to the current one.
+fn claim_hook(entry: &mut serde_json::Value, key: &str) -> Option<bool> {
+    let command = entry.get(key)?.as_str()?;
+    if command.starts_with(HOOK_COMMAND) {
+        return Some(false);
+    }
+    let rest = command.strip_prefix(LEGACY_HOOK_COMMAND)?;
+    entry[key] = json!(format!("{HOOK_COMMAND}{rest}"));
+    Some(true)
+}
+
+/// Claims every symposium hook among `entries`: `None` when there is none,
+/// otherwise whether any legacy command was rewritten.
+fn claim_hooks<'a>(
+    entries: impl Iterator<Item = &'a mut serde_json::Value>,
+    key: &str,
+) -> Option<bool> {
+    entries
+        .filter_map(|entry| claim_hook(entry, key))
+        .reduce(|a, b| a | b)
+}
+
+fn nested_handlers(
+    groups: &mut [serde_json::Value],
+) -> impl Iterator<Item = &mut serde_json::Value> {
+    groups
+        .iter_mut()
+        .filter_map(|group| group.get_mut("hooks").and_then(|h| h.as_array_mut()))
+        .flatten()
+}
+
+fn hook_command(agent: &str, event: &str) -> String {
+    format!("{HOOK_COMMAND} {agent} {event}")
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) struct CompiledPlugin {
+    pub name: String,
+    pub dir: PathBuf,
+    pub updated: bool,
+}
+
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct Delivery {
+    pub delivered: Vec<String>,
+    pub updated: Vec<String>,
+}
 
 /// Which of an agent's two MCP configuration levels to write.
 ///
@@ -71,6 +136,13 @@ impl Agent {
         }
     }
 
+    pub(crate) fn is_configured(&self, sym: &Symposium) -> bool {
+        sym.config
+            .agents
+            .iter()
+            .any(|entry| entry.name == self.config_name())
+    }
+
     /// Human-readable display name.
     pub fn display_name(&self) -> &'static str {
         match self {
@@ -97,6 +169,28 @@ impl Agent {
         ]
     }
 
+    pub fn detect_installed(sym: &Symposium) -> Vec<Agent> {
+        Agent::all()
+            .iter()
+            .copied()
+            .filter(|agent| agent.user_config_dir(sym).is_dir())
+            .collect()
+    }
+
+    fn user_config_dir(&self, sym: &Symposium) -> PathBuf {
+        let home = sym.home_dir();
+        match self {
+            // Not `~/.gemini/` alone: Gemini CLI creates that one too.
+            Agent::Antigravity => home.join(".gemini").join("antigravity-cli"),
+            Agent::Claude => claude_config_dir(sym),
+            Agent::Codex => codex_dir(sym),
+            Agent::Copilot => copilot_config_dir(sym),
+            Agent::Goose => goose_config_dir(sym),
+            Agent::Kiro => home.join(".kiro"),
+            Agent::OpenCode => xdg_config_dir(sym).join("opencode"),
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Skill installation paths
     // -----------------------------------------------------------------------
@@ -118,7 +212,10 @@ impl Agent {
             }
             Agent::Goose => project_root.join(".agents").join("skills").join(skill_name),
             Agent::Kiro => project_root.join(".kiro").join("skills").join(skill_name),
-            Agent::OpenCode => project_root.join(".agents").join("skills").join(skill_name),
+            Agent::OpenCode => project_root
+                .join(".opencode")
+                .join("skills")
+                .join(skill_name),
         }
     }
 
@@ -143,6 +240,15 @@ impl Agent {
             Agent::Goose => Some(home.join(".agents").join("skills").join(skill_name)),
             Agent::Kiro => Some(home.join(".kiro").join("skills").join(skill_name)),
             Agent::OpenCode => Some(home.join(".agents").join("skills").join(skill_name)),
+        }
+    }
+
+    pub(crate) fn reads_vendor_neutral_skills(&self) -> bool {
+        match self {
+            Agent::Antigravity | Agent::Codex | Agent::Copilot | Agent::Goose | Agent::OpenCode => {
+                true
+            }
+            Agent::Claude | Agent::Kiro => false,
         }
     }
 
@@ -234,10 +340,6 @@ impl Agent {
         sym: &Symposium,
     ) -> PathBuf {
         let home = sym.home_dir();
-        let xdg_config = || {
-            sym.env_dir("XDG_CONFIG_HOME")
-                .unwrap_or_else(|| home.join(".config"))
-        };
 
         match (self, scope) {
             // Project MCP is `.mcp.json`; the user-level file is `.claude.json`.
@@ -259,7 +361,7 @@ impl Agent {
 
             (Agent::OpenCode, McpScope::Project) => project_root.join("opencode.json"),
             (Agent::OpenCode, McpScope::User) => {
-                xdg_config().join("opencode").join("opencode.json")
+                xdg_config_dir(sym).join("opencode").join("opencode.json")
             }
 
             (Agent::Kiro, McpScope::Project) => {
@@ -274,10 +376,7 @@ impl Agent {
             // to a file nobody reads.
             (Agent::Codex, _) => codex_dir(sym).join("config.toml"),
             (Agent::Copilot, _) => copilot_config_dir(sym).join("mcp-config.json"),
-            (Agent::Goose, _) => goose_path_root(sym)
-                .map(|root| root.join("config"))
-                .unwrap_or_else(|| xdg_config().join("goose"))
-                .join("config.yaml"),
+            (Agent::Goose, _) => goose_config_dir(sym).join("config.yaml"),
         }
     }
 
@@ -348,6 +447,57 @@ impl Agent {
         }
     }
 
+    pub(crate) fn deliver_user_plugins(
+        &self,
+        sym: &Symposium,
+        plugins: &[CompiledPlugin],
+    ) -> Option<Delivery> {
+        let plugins_dir = match self {
+            Agent::Antigravity => sym
+                .home_dir()
+                .join(".gemini")
+                .join("config")
+                .join("plugins"),
+            Agent::Claude => claude_config_dir(sym).join("skills"),
+            Agent::Codex => return plugin_registration::codex::deliver_user_plugins(sym, plugins),
+            Agent::Copilot => {
+                return plugin_registration::copilot::deliver_user_plugins(sym, plugins);
+            }
+            Agent::Goose => goose_path_root(sym)
+                .unwrap_or_else(|| sym.home_dir().to_path_buf())
+                .join(".agents")
+                .join("plugins"),
+            Agent::Kiro | Agent::OpenCode => return None,
+        };
+        Some(plugin_registration::deliver_copies(
+            sym,
+            *self,
+            &plugins_dir,
+            plugins,
+        ))
+    }
+
+    pub(crate) fn deliver_project_plugins(
+        &self,
+        sym: &Symposium,
+        project_root: &Path,
+        plugins: &[CompiledPlugin],
+    ) -> Option<Delivery> {
+        let Agent::Claude = self else {
+            return None;
+        };
+        let skills_dir = project_root.join(".claude").join("skills");
+        let delivery = plugin_registration::deliver_copies(sym, *self, &skills_dir, plugins);
+        for name in &delivery.delivered {
+            if let Err(e) = crate::sync::ignore_in_git(&skills_dir.join(name)) {
+                tracing::info!(
+                    report = %crate::report::ReportEvent::Warning { message: format!("{e:#}") },
+                );
+            }
+        }
+        Some(delivery)
+    }
+
     /// Remove hooks from the project-level agent config.
     pub fn unregister_project_hooks(&self, project_root: &Path, _sym: &Symposium, out: &Output) {
         match self {
@@ -413,7 +563,7 @@ fn register_claude_hooks(settings_path: &Path, out: &Output) -> Result<()> {
         "SessionStart",
         "Stop",
     ] {
-        let command = format!("cargo-agents hook claude {}", event_to_cli_arg(event));
+        let command = hook_command("claude", event_to_cli_arg(event));
         if ensure_claude_hook_entry(event_hooks(hooks_obj, event, &display)?, &command) {
             added.push(event);
         }
@@ -429,23 +579,10 @@ fn register_claude_hooks(settings_path: &Path, out: &Output) -> Result<()> {
     Ok(())
 }
 
-/// Returns `true` if a new entry was added, `false` if already registered.
+/// Returns `true` if an entry was added or rewritten, `false` if already registered.
 fn ensure_claude_hook_entry(arr: &mut Vec<serde_json::Value>, command: &str) -> bool {
-    let already_registered = arr.iter().any(|group| {
-        group
-            .get("hooks")
-            .and_then(|h| h.as_array())
-            .is_some_and(|hooks| {
-                hooks.iter().any(|h| {
-                    h.get("command")
-                        .and_then(|c| c.as_str())
-                        .is_some_and(|c| c.starts_with("cargo-agents hook"))
-                })
-            })
-    });
-
-    if already_registered {
-        return false;
+    if let Some(rewritten) = claim_hooks(nested_handlers(arr), "command") {
+        return rewritten;
     }
 
     arr.push(json!({
@@ -481,7 +618,7 @@ fn register_codex_hooks(hooks_path: &Path, out: &Output) -> Result<()> {
         "SessionStart",
         "Stop",
     ] {
-        let command = format!("cargo-agents hook codex {}", event_to_cli_arg(event));
+        let command = hook_command("codex", event_to_cli_arg(event));
         if ensure_codex_hook_entry(event_hooks(hooks_obj, event, &display)?, &command) {
             added.push(event);
         }
@@ -497,23 +634,10 @@ fn register_codex_hooks(hooks_path: &Path, out: &Output) -> Result<()> {
     Ok(())
 }
 
-/// Returns `true` if a new entry was added, `false` if already registered.
+/// Returns `true` if an entry was added or rewritten, `false` if already registered.
 fn ensure_codex_hook_entry(arr: &mut Vec<serde_json::Value>, command: &str) -> bool {
-    let already_registered = arr.iter().any(|group| {
-        group
-            .get("hooks")
-            .and_then(|h| h.as_array())
-            .is_some_and(|hooks| {
-                hooks.iter().any(|h| {
-                    h.get("command")
-                        .and_then(|c| c.as_str())
-                        .is_some_and(|c| c.starts_with("cargo-agents hook"))
-                })
-            })
-    });
-
-    if already_registered {
-        return false;
+    if let Some(rewritten) = claim_hooks(nested_handlers(arr), "command") {
+        return rewritten;
     }
 
     arr.push(json!({
@@ -528,7 +652,7 @@ fn ensure_codex_hook_entry(arr: &mut Vec<serde_json::Value>, command: &str) -> b
 }
 
 fn unregister_codex_hooks(hooks_path: &Path, out: &Output) {
-    unregister_settings_hooks(hooks_path, "cargo-agents hook", out);
+    unregister_settings_hooks(hooks_path, out);
 }
 
 // ---------------------------------------------------------------------------
@@ -546,20 +670,21 @@ fn register_copilot_hooks_global(config_path: &Path, out: &Output) -> Result<()>
     let mut config = load_json_or_empty(config_path)?;
     let hooks_obj = hooks_object(&mut config, &display)?;
 
-    // Check if already registered
-    let already = hooks_obj.values().any(|arr| {
-        arr.as_array().is_some_and(|a| {
-            a.iter().any(|h| {
-                h.get("bash")
-                    .and_then(|c| c.as_str())
-                    .is_some_and(|c| c.starts_with("cargo-agents hook"))
-            })
-        })
-    });
-
-    if already {
-        out.already_ok(format!("{display}: hooks already registered"));
-        return Ok(());
+    let entries = hooks_obj
+        .values_mut()
+        .filter_map(|arr| arr.as_array_mut())
+        .flatten();
+    match claim_hooks(entries, "bash") {
+        Some(false) => {
+            out.already_ok(format!("{display}: hooks already registered"));
+            return Ok(());
+        }
+        Some(true) => {
+            save_json(config_path, &config)?;
+            out.done(format!("{display}: updated hooks"));
+            return Ok(());
+        }
+        None => {}
     }
 
     let copilot_hooks = copilot_hook_entries();
@@ -580,7 +705,7 @@ fn register_copilot_hooks(hooks_dir: &Path, out: &Output) -> Result<()> {
 
     if hook_file.exists() {
         let existing = fs::read_to_string(&hook_file)?;
-        if existing.contains("cargo-agents hook") {
+        if existing.contains(HOOK_COMMAND) {
             out.already_ok(format!("{display}: hooks already registered"));
             return Ok(());
         }
@@ -608,7 +733,7 @@ fn copilot_hook_entries() -> Vec<(&'static str, serde_json::Value)> {
             "preToolUse",
             json!({
                 "type": "command",
-                "bash": "cargo-agents hook copilot pre-tool-use",
+                "bash": hook_command("copilot", "pre-tool-use"),
                 "timeoutSec": 10
             }),
         ),
@@ -616,7 +741,7 @@ fn copilot_hook_entries() -> Vec<(&'static str, serde_json::Value)> {
             "postToolUse",
             json!({
                 "type": "command",
-                "bash": "cargo-agents hook copilot post-tool-use",
+                "bash": hook_command("copilot", "post-tool-use"),
                 "timeoutSec": 10
             }),
         ),
@@ -624,7 +749,7 @@ fn copilot_hook_entries() -> Vec<(&'static str, serde_json::Value)> {
             "userPromptSubmitted",
             json!({
                 "type": "command",
-                "bash": "cargo-agents hook copilot user-prompt-submit",
+                "bash": hook_command("copilot", "user-prompt-submit"),
                 "timeoutSec": 10
             }),
         ),
@@ -632,7 +757,7 @@ fn copilot_hook_entries() -> Vec<(&'static str, serde_json::Value)> {
             "sessionStart",
             json!({
                 "type": "command",
-                "bash": "cargo-agents hook copilot session-start",
+                "bash": hook_command("copilot", "session-start"),
                 "timeoutSec": 10
             }),
         ),
@@ -672,7 +797,7 @@ fn antigravity_is_tool_event(event: &str) -> bool {
 fn antigravity_handler(cli_arg: &str) -> serde_json::Value {
     json!({
         "type": "command",
-        "command": format!("cargo-agents hook antigravity {cli_arg}"),
+        "command": hook_command("antigravity", cli_arg),
         "timeout": 30,
     })
 }
@@ -691,11 +816,18 @@ fn register_antigravity_hooks(hooks_path: &Path, out: &Output) -> Result<()> {
         };
         entry.insert((*event).to_string(), value);
     }
-    let entry = serde_json::Value::Object(entry);
+    let mut entry = serde_json::Value::Object(entry);
 
     let obj = config
         .as_object_mut()
         .with_context(|| format!("{display} is not a JSON object"))?;
+    if obj
+        .get(ANTIGRAVITY_HOOK_NAME)
+        .and_then(|existing| existing.get("enabled"))
+        == Some(&json!(false))
+    {
+        entry["enabled"] = json!(false);
+    }
     if obj.get(ANTIGRAVITY_HOOK_NAME) == Some(&entry) {
         out.already_ok(format!("{display}: hooks already registered"));
         return Ok(());
@@ -802,17 +934,11 @@ fn register_kiro_hooks(agents_dir: &Path, out: &Output) -> Result<()> {
     Ok(())
 }
 
-/// Returns `true` if a new entry was added, `false` if already registered.
+/// Returns `true` if an entry was added or rewritten, `false` if already registered.
 fn ensure_kiro_hook_entry(arr: &mut Vec<serde_json::Value>, entry: &serde_json::Value) -> bool {
     // Kiro uses a flat structure: each entry has `command` directly (no nested `hooks` array)
-    let already_registered = arr.iter().any(|e| {
-        e.get("command")
-            .and_then(|c| c.as_str())
-            .is_some_and(|c| c.starts_with("cargo-agents hook"))
-    });
-
-    if already_registered {
-        return false;
+    if let Some(rewritten) = claim_hooks(arr.iter_mut(), "command") {
+        return rewritten;
     }
 
     arr.push(entry.clone());
@@ -826,26 +952,26 @@ fn kiro_hook_entries() -> Vec<(&'static str, serde_json::Value)> {
             "preToolUse",
             json!({
                 "matcher": "*",
-                "command": "cargo-agents hook kiro pre-tool-use"
+                "command": hook_command("kiro", "pre-tool-use")
             }),
         ),
         (
             "postToolUse",
             json!({
                 "matcher": "*",
-                "command": "cargo-agents hook kiro post-tool-use"
+                "command": hook_command("kiro", "post-tool-use")
             }),
         ),
         (
             "userPromptSubmit",
             json!({
-                "command": "cargo-agents hook kiro user-prompt-submit"
+                "command": hook_command("kiro", "user-prompt-submit")
             }),
         ),
         (
             "agentSpawn",
             json!({
-                "command": "cargo-agents hook kiro session-start"
+                "command": hook_command("kiro", "session-start")
             }),
         ),
     ]
@@ -867,7 +993,7 @@ fn unregister_kiro_hooks(agents_dir: &Path, out: &Output) {
 // ---------------------------------------------------------------------------
 
 /// Remove symposium hooks from a Claude-style settings.json file.
-fn unregister_settings_hooks(settings_path: &Path, command_prefix: &str, out: &Output) {
+fn unregister_settings_hooks(settings_path: &Path, out: &Output) {
     remove_hook_entries(settings_path, out, |group| {
         let Some(handlers) = group.get_mut("hooks").and_then(|h| h.as_array_mut()) else {
             return false;
@@ -876,7 +1002,7 @@ fn unregister_settings_hooks(settings_path: &Path, command_prefix: &str, out: &O
         handlers.retain(|h| {
             !h.get("command")
                 .and_then(|c| c.as_str())
-                .is_some_and(|c| c.starts_with(command_prefix))
+                .is_some_and(is_symposium_hook)
         });
         handlers.len() < before && handlers.is_empty()
     });
@@ -926,7 +1052,7 @@ fn remove_hook_entries(
 }
 
 fn unregister_claude_hooks(settings_path: &Path, out: &Output) {
-    unregister_settings_hooks(settings_path, "cargo-agents hook", out);
+    unregister_settings_hooks(settings_path, out);
 }
 
 /// Remove symposium hooks from a Copilot project hooks directory.
@@ -955,7 +1081,7 @@ fn unregister_flat_hooks(config_path: &Path, command_key: &str, out: &Output) {
         entry
             .get(command_key)
             .and_then(|c| c.as_str())
-            .is_some_and(|c| c.starts_with("cargo-agents hook"))
+            .is_some_and(is_symposium_hook)
     });
 }
 
@@ -965,6 +1091,17 @@ fn unregister_flat_hooks(config_path: &Path, command_key: &str, out: &Output) {
 
 fn goose_path_root(sym: &Symposium) -> Option<PathBuf> {
     sym.env_dir("GOOSE_PATH_ROOT")
+}
+
+fn xdg_config_dir(sym: &Symposium) -> PathBuf {
+    sym.env_dir("XDG_CONFIG_HOME")
+        .unwrap_or_else(|| sym.home_dir().join(".config"))
+}
+
+fn goose_config_dir(sym: &Symposium) -> PathBuf {
+    goose_path_root(sym)
+        .map(|root| root.join("config"))
+        .unwrap_or_else(|| xdg_config_dir(sym).join("goose"))
 }
 
 fn event_to_cli_arg(event: &str) -> &str {
@@ -1101,6 +1238,110 @@ mod tests {
         assert!(Agent::from_config_name("unknown").is_err());
     }
 
+    fn detect(home: &Path, vars: &[(&str, &Path)]) -> Vec<Agent> {
+        let vars: Vec<(String, std::ffi::OsString)> = vars
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.as_os_str().to_owned()))
+            .collect();
+        let mut sym = Symposium::from_dir(home);
+        sym.set_env(move |name| {
+            vars.iter()
+                .find(|(var, _)| var == name)
+                .map(|(_, value)| value.clone())
+        });
+        Agent::detect_installed(&sym)
+    }
+
+    #[test]
+    fn detects_nothing_on_a_bare_machine() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(detect(home.path(), &[]).is_empty());
+    }
+
+    #[test]
+    fn detects_agent_by_config_dir() {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir(home.path().join(".codex")).unwrap();
+        assert_eq!(detect(home.path(), &[]), vec![Agent::Codex]);
+    }
+
+    #[test]
+    fn a_file_is_not_a_config_dir() {
+        let home = tempfile::tempdir().unwrap();
+        fs::write(home.path().join(".codex"), "").unwrap();
+        assert!(detect(home.path(), &[]).is_empty());
+    }
+
+    #[test]
+    fn empty_relocation_falls_back_to_home() {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir(home.path().join(".claude")).unwrap();
+        assert_eq!(
+            detect(home.path(), &[("CLAUDE_CONFIG_DIR", Path::new(""))]),
+            vec![Agent::Claude]
+        );
+    }
+
+    #[test]
+    fn gemini_dir_alone_is_not_antigravity() {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir(home.path().join(".gemini")).unwrap();
+        assert!(detect(home.path(), &[]).is_empty());
+
+        fs::create_dir(home.path().join(".gemini").join("antigravity-cli")).unwrap();
+        assert_eq!(detect(home.path(), &[]), vec![Agent::Antigravity]);
+    }
+
+    #[test]
+    fn detection_honors_relocated_config_dirs() {
+        let home = tempfile::tempdir().unwrap();
+        let moved = tempfile::tempdir().unwrap();
+        let dir = |name: &str| moved.path().join(name);
+        for name in ["claude", "codex", "copilot", "goose/config", "xdg/opencode"] {
+            fs::create_dir_all(dir(name)).unwrap();
+        }
+        assert_eq!(
+            detect(
+                home.path(),
+                &[
+                    ("CLAUDE_CONFIG_DIR", &dir("claude")),
+                    ("CODEX_HOME", &dir("codex")),
+                    ("COPILOT_HOME", &dir("copilot")),
+                    ("GOOSE_PATH_ROOT", &dir("goose")),
+                    ("XDG_CONFIG_HOME", &dir("xdg")),
+                ]
+            ),
+            vec![
+                Agent::Claude,
+                Agent::Codex,
+                Agent::Copilot,
+                Agent::Goose,
+                Agent::OpenCode
+            ]
+        );
+    }
+
+    #[test]
+    fn a_relocated_agent_is_not_detected_in_its_default_dir() {
+        let home = tempfile::tempdir().unwrap();
+        let moved = tempfile::tempdir().unwrap();
+        for name in [".claude", ".codex", ".copilot", ".config/goose"] {
+            fs::create_dir_all(home.path().join(name)).unwrap();
+        }
+        assert!(
+            detect(
+                home.path(),
+                &[
+                    ("CLAUDE_CONFIG_DIR", &moved.path().join("claude")),
+                    ("CODEX_HOME", &moved.path().join("codex")),
+                    ("COPILOT_HOME", &moved.path().join("copilot")),
+                    ("GOOSE_PATH_ROOT", moved.path()),
+                ]
+            )
+            .is_empty()
+        );
+    }
+
     /// Each path was confirmed by asking the tool itself, not read off docs: a
     /// wrong one fails silently, since symposium reports success for writing a
     /// file the agent never reads.
@@ -1148,7 +1389,7 @@ mod tests {
 
         let servers = [McpServer::Stdio(McpServerStdio::new(
             "symposium",
-            "/usr/local/bin/cargo-agents",
+            "/usr/local/bin/symposium",
         ))];
         let out = Output::quiet();
         let project = Path::new("/project");
@@ -1206,10 +1447,7 @@ mod tests {
                 .register_mcp_servers(McpScope::User, project, &sym, &servers, &out)
                 .unwrap();
             if let Some(hooks) = hooks {
-                assert!(
-                    read(hooks).contains("cargo-agents hook"),
-                    "{agent:?} {env:?}"
-                );
+                assert!(read(hooks).contains("symposium hook"), "{agent:?} {env:?}");
             }
             assert!(read(mcp).contains("symposium"), "{agent:?} {env:?}");
 
@@ -1222,10 +1460,7 @@ mod tests {
                 )
                 .unwrap();
             if let Some(hooks) = hooks {
-                assert!(
-                    !read(hooks).contains("cargo-agents hook"),
-                    "{agent:?} {env:?}"
-                );
+                assert!(!read(hooks).contains("symposium hook"), "{agent:?} {env:?}");
             }
             assert!(!read(mcp).contains("symposium"), "{agent:?} {env:?}");
         }
@@ -1237,7 +1472,7 @@ mod tests {
 
         let servers = [McpServer::Stdio(McpServerStdio::new(
             "symposium",
-            "/usr/local/bin/cargo-agents",
+            "/usr/local/bin/symposium",
         ))];
         let out = Output::quiet();
         let json_hooks: &[&str] = &[
@@ -1435,7 +1670,7 @@ mod tests {
         assert!(hooks.get("SessionStart").is_some());
         assert_eq!(
             hooks["Stop"][0]["hooks"][0]["command"],
-            "cargo-agents hook codex stop"
+            "symposium hook codex stop"
         );
 
         // Verify the structure uses empty matcher
@@ -1511,7 +1746,7 @@ mod tests {
 
         // Verify flat format (command directly on entry, no nested hooks array)
         let pre_tool = &content["hooks"]["preToolUse"][0];
-        assert_eq!(pre_tool["command"], "cargo-agents hook kiro pre-tool-use");
+        assert_eq!(pre_tool["command"], "symposium hook kiro pre-tool-use");
         assert_eq!(pre_tool["matcher"], "*");
         assert!(pre_tool.get("hooks").is_none());
     }
@@ -1528,6 +1763,70 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&hook_file).unwrap()).unwrap();
         let pre_tool = content["hooks"]["preToolUse"].as_array().unwrap();
         assert_eq!(pre_tool.len(), 1);
+    }
+
+    fn with_legacy_commands(path: &Path) {
+        let current = fs::read_to_string(path).unwrap();
+        fs::write(path, current.replace(HOOK_COMMAND, LEGACY_HOOK_COMMAND)).unwrap();
+    }
+
+    #[test]
+    fn registering_over_legacy_hooks_rewrites_them_in_place() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = Output::quiet();
+        let kiro_dir = tmp.path().join("kiro");
+        let registrations: [(PathBuf, fn(&Path, &Output) -> Result<()>); 4] = [
+            (tmp.path().join("claude.json"), register_claude_hooks),
+            (tmp.path().join("codex.json"), register_codex_hooks),
+            (
+                tmp.path().join("copilot.json"),
+                register_copilot_hooks_global,
+            ),
+            (kiro_dir.join("symposium.json"), |path, out| {
+                register_kiro_hooks(path.parent().unwrap(), out)
+            }),
+        ];
+        for (path, register) in registrations {
+            register(&path, &out).unwrap();
+            let fresh = fs::read_to_string(&path).unwrap();
+            with_legacy_commands(&path);
+
+            register(&path, &out).unwrap();
+            assert_eq!(
+                fs::read_to_string(&path).unwrap(),
+                fresh,
+                "{}",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn unregistering_removes_legacy_hooks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = Output::quiet();
+        let registrations: [(&str, fn(&Path, &Output) -> Result<()>, fn(&Path, &Output)); 3] = [
+            (
+                "claude.json",
+                register_claude_hooks,
+                unregister_claude_hooks,
+            ),
+            ("codex.json", register_codex_hooks, unregister_codex_hooks),
+            (
+                "copilot.json",
+                register_copilot_hooks_global,
+                unregister_copilot_hooks_global,
+            ),
+        ];
+        for (name, register, unregister) in registrations {
+            let path = tmp.path().join(name);
+            register(&path, &out).unwrap();
+            with_legacy_commands(&path);
+
+            unregister(&path, &out);
+            let left = fs::read_to_string(&path).unwrap();
+            assert!(!left.contains(LEGACY_HOOK_COMMAND), "{name}: {left}");
+        }
     }
 
     #[test]
@@ -1609,7 +1908,7 @@ mod tests {
                 after["hooks"]["PreToolUse"],
                 json!([{ "matcher": matcher, "hooks": [user_hook] }])
             );
-            assert!(!content.contains("cargo-agents hook"));
+            assert!(!content.contains("symposium hook"));
         }
     }
 
@@ -1639,7 +1938,7 @@ mod tests {
     fn unregistering_hooks_keeps_the_order_of_the_rest() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("settings.json");
-        let text = "{\n  \"hooks\": {\n    \"PreToolUse\": [\n      {\n        \"hooks\": [\n          {\n            \"command\": \"cargo-agents hook claude pre-tool-use\",\n            \"type\": \"command\"\n          }\n        ]\n      }\n    ],\n    \"A\": [],\n    \"B\": []\n  }\n}\n";
+        let text = "{\n  \"hooks\": {\n    \"PreToolUse\": [\n      {\n        \"hooks\": [\n          {\n            \"command\": \"symposium hook claude pre-tool-use\",\n            \"type\": \"command\"\n          }\n        ]\n      }\n    ],\n    \"A\": [],\n    \"B\": []\n  }\n}\n";
         fs::write(&path, text).unwrap();
         unregister_claude_hooks(&path, &Output::quiet());
         assert_eq!(
@@ -1657,11 +1956,11 @@ mod tests {
     }
 
     #[test]
-    fn opencode_project_skill_dir_uses_vendor_neutral() {
+    fn opencode_project_skill_dir() {
         let root = Path::new("/project");
         assert_eq!(
             Agent::OpenCode.project_skill_dir(root, "tokio"),
-            PathBuf::from("/project/.agents/skills/tokio")
+            PathBuf::from("/project/.opencode/skills/tokio")
         );
     }
 
@@ -1713,7 +2012,7 @@ mod tests {
         assert_eq!(pre_tool["matcher"], "*");
         assert_eq!(
             pre_tool["hooks"][0]["command"],
-            "cargo-agents hook antigravity pre-tool-use"
+            "symposium hook antigravity pre-tool-use"
         );
 
         // Lifecycle events are flat handler lists — no matcher wrapper.
@@ -1721,22 +2020,53 @@ mod tests {
         assert!(pre_invocation.get("matcher").is_none());
         assert_eq!(
             pre_invocation["command"],
-            "cargo-agents hook antigravity user-prompt-submit"
+            "symposium hook antigravity user-prompt-submit"
         );
 
         // SessionStart is undocumented but real; it fires with the first turn
         // of a new conversation and never on resume.
         assert_eq!(
             entry["SessionStart"][0]["command"],
-            "cargo-agents hook antigravity session-start"
+            "symposium hook antigravity session-start"
         );
         assert_eq!(
             entry["Stop"][0]["command"],
-            "cargo-agents hook antigravity stop"
+            "symposium hook antigravity stop"
         );
 
         // Timeout is in seconds for this agent, not milliseconds.
         assert_eq!(pre_invocation["timeout"], 30);
+    }
+
+    #[test]
+    fn antigravity_user_disabled_hook_stays_disabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("hooks.json");
+        register_antigravity_hooks(&path, &Output::quiet()).unwrap();
+        let mut cfg: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        cfg["symposium"]["enabled"] = json!(false);
+        cfg["symposium"]["Stop"][0]["command"] = json!("/old");
+        fs::write(&path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+
+        register_antigravity_hooks(&path, &Output::quiet()).unwrap();
+        let cfg: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(cfg["symposium"]["enabled"], false, "got: {cfg:#}");
+        assert_eq!(
+            cfg["symposium"]["Stop"][0]["command"],
+            "symposium hook antigravity stop"
+        );
+
+        let out = Output::capturing();
+        register_antigravity_hooks(&path, &out).unwrap();
+        assert!(
+            out.captured()
+                .iter()
+                .any(|line| line.contains("already registered")),
+            "{:?}",
+            out.captured()
+        );
     }
 
     #[test]
@@ -1784,7 +2114,7 @@ mod tests {
         use sacp::schema::{McpServer, McpServerStdio};
         let servers = vec![McpServer::Stdio(McpServerStdio::new(
             "symposium",
-            "/usr/local/bin/cargo-agents",
+            "/usr/local/bin/symposium",
         ))];
 
         let tmp = tempfile::tempdir().unwrap();

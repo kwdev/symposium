@@ -43,6 +43,10 @@ dependency does not run without your consent, and a registry is a trust root you
 added yourself. Symposium does not put a second, filesystem-shaped boundary on
 top of it.
 
+An [Agent Plugins package](./agent-plugins.md#security) is the one exception:
+its format requires every path in it to resolve inside the package, so a link in
+one of its skills that resolves outside the package is skipped with a warning.
+
 Two links are skipped rather than followed, each with a warning, and neither
 fails the sync:
 
@@ -80,7 +84,7 @@ Other fields, such as `license`, `allowed-tools`, or the agentskills.io `metadat
 - The `crates` field is rejected; use `depends-on`.
 - In [workspace skills](../workspace-skills.md) the frontmatter is optional: `name` defaults to the name of the skill's directory, and `description` may be omitted. Skills from a registry or a crate need both.
 
-> **Security:** a skill's `name` comes from plugin content and becomes a directory on disk, so Symposium treats it as untrusted input. A name that would resolve outside the agent's skills directory is rejected: the skill fails to load instead of being installed, and `cargo agents sync` and `cargo agents plugin validate` report it.
+> **Security:** a skill's `name` comes from plugin content and becomes a directory on disk, so Symposium treats it as untrusted input. A name that would resolve outside the agent's skills directory is rejected: the skill fails to load instead of being installed, and `symposium sync` and `symposium plugin validate` report it.
 
 ## Crate atoms
 

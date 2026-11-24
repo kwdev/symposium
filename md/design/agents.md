@@ -1,6 +1,6 @@
 # Agents
 
-`cargo agents` supports multiple AI agents. Each agent has its own hook protocol, file layout, and configuration locations. This page documents the agent-specific details that `cargo agents` needs to handle.
+`symposium` supports multiple AI agents. Each agent has its own hook protocol, file layout, and configuration locations. This page documents the agent-specific details that `symposium` needs to handle.
 
 ## Supported agents
 
@@ -18,9 +18,9 @@ The agent name is stored in `[agent] name` in either the user or project config.
 
 ## Agent responsibilities
 
-For each agent, `cargo agents` needs to know how to:
+For each agent, `symposium` needs to know how to:
 
-1. **Register hooks** — write the hook configuration so the agent calls `cargo-agents hook` on the right events.
+1. **Register hooks**: write the hook configuration so the agent calls `symposium hook` on the right events.
 2. **Install extensions** — place skill files (and eventually workflow/MCP definitions) where the agent expects them.
 
 Where these files go depends on whether the agent is configured at the user level or the project level (see [`sync --agent`](./sync-agent-flow.md)).
@@ -29,15 +29,16 @@ Unregistering takes symposium's entries out of a hooks file it shares with the u
 
 ## Extension locations
 
-When installing skills, `cargo agents` prefers vendor-neutral paths where possible:
+When installing skills, `symposium` prefers vendor-neutral paths where possible:
 
 | Scope | Path | Supported by |
 |-------|------|-------------|
-| Project skills | `.agents/skills/<skill-name>/SKILL.md` | Antigravity, Copilot, Codex, OpenCode, Goose |
-| Project skills | `.claude/skills/<skill-name>/SKILL.md` | Claude Code (does not support `.agents/skills/`) |
+| Project skills | `.agents/skills/<skill-name>/SKILL.md` | Antigravity, Copilot, Codex, Goose |
+| Project skills | `.claude/skills/<skill-name>/SKILL.md` | Claude Code (does not support `.agents/skills/`), only for a skill no compiled plugin carries |
 | Project skills | `.kiro/skills/<skill-name>/SKILL.md` | Kiro (uses its own path) |
+| Project skills | `.opencode/skills/<skill-name>/SKILL.md` | OpenCode (also reads `.agents/skills/`) |
 
-At the project level, Claude Code requires `.claude/skills/`, Kiro requires `.kiro/skills/`, while Antigravity, Copilot, Codex, OpenCode, and Goose all support `.agents/skills/`. `cargo agents` uses the vendor-neutral `.agents/skills/` path whenever the agent supports it.
+At the project level, Claude Code requires `.claude/skills/`, Kiro requires `.kiro/skills/`, while Antigravity, Copilot, Codex, OpenCode, and Goose all support `.agents/skills/`. `symposium` uses the vendor-neutral `.agents/skills/` path whenever the agent supports it, except for OpenCode: an agent that reads `.agents/skills/` and takes a plugin enabled with `use --global` as a plugin would also find OpenCode's per-skill copies of its skills, so they go to `.opencode/skills/`, which only OpenCode reads. A skill authored in `.agents/skills/` gets no copy there, since OpenCode reads it where it is.
 
 At the global level, each agent has its own path:
 
@@ -50,6 +51,10 @@ At the global level, each agent has its own path:
 | Kiro | `~/.kiro/skills/<skill-name>/SKILL.md` |
 | OpenCode | `~/.agents/skills/<skill-name>/SKILL.md` |
 | Goose | `~/.agents/skills/<skill-name>/SKILL.md` |
+
+A plugin enabled with `use --global` reaches an agent as one compiled plugin directory instead, through `Agent::deliver_user_plugins`: Claude Code receives it in `~/.claude/skills/<plugin>/`, Antigravity CLI in `~/.gemini/config/plugins/<plugin>/`, Goose in `~/.agents/plugins/<plugin>/`, Codex CLI installs it into its plugin cache through two entries in `~/.codex/config.toml`, the Copilot CLI loads it in place through two entries in `~/.copilot/settings.json`, and the other agents keep per-skill copies in the project. See [`sync`](./sync-agent-flow.md#plugins-enabled-for-every-workspace).
+
+Every other plugin that applies to the workspace is compiled the same way into the project staging root, `<project>/.symposium/plugins/<plugin>/`, and reaches an agent that can scope a plugin to a project through `Agent::deliver_project_plugins`. Only Claude Code does: it receives each directory in `<project>/.claude/skills/<plugin>/` and then gets no per-skill copies of that plugin's skills. Every other agent keeps per-skill copies in the project. See [`sync`](./sync-agent-flow.md#plugins-for-this-project).
 
 ---
 
@@ -78,7 +83,7 @@ Example hook registration:
         "hooks": [
           {
             "type": "command",
-            "command": "cargo-agents hook claude pre-tool-use"
+            "command": "symposium hook claude pre-tool-use"
           }
         ]
       }
@@ -141,7 +146,7 @@ Example hook registration:
     "preToolUse": [
       {
         "type": "command",
-        "bash": "cargo-agents hook copilot pre-tool-use",
+        "bash": "symposium hook copilot pre-tool-use",
         "timeoutSec": 10
       }
     ]
@@ -204,7 +209,7 @@ else in the file untouched.
         "hooks": [
           {
             "type": "command",
-            "command": "cargo-agents hook antigravity pre-tool-use",
+            "command": "symposium hook antigravity pre-tool-use",
             "timeout": 30
           }
         ]
@@ -213,7 +218,7 @@ else in the file untouched.
     "SessionStart": [
       {
         "type": "command",
-        "command": "cargo-agents hook antigravity session-start",
+        "command": "symposium hook antigravity session-start",
         "timeout": 30
       }
     ]
@@ -269,12 +274,12 @@ Example hook registration:
     "preToolUse": [
       {
         "matcher": "*",
-        "command": "cargo-agents hook kiro pre-tool-use"
+        "command": "symposium hook kiro pre-tool-use"
       }
     ],
     "agentSpawn": [
       {
-        "command": "cargo-agents hook kiro session-start"
+        "command": "symposium hook kiro session-start"
       }
     ]
   }
@@ -331,7 +336,7 @@ Example hook registration:
         "matcher": "",
         "hooks": [{
           "type": "command",
-          "command": "cargo-agents hook codex pre-tool-use",
+          "command": "symposium hook codex pre-tool-use",
           "timeout": 10
         }]
       }
@@ -395,7 +400,7 @@ OpenCode's plugin system supports these events, but Symposium does not currently
 
 **Symposium registers no hooks for Goose.** Goose has lifecycle hooks of its own (a plugin can carry them in `hooks/hooks.json`), but symposium does not use them.
 
-Goose is supported as a **skills-only** agent — `cargo agents sync` will install skill files in the vendor-neutral `.agents/skills/` path.
+Goose is supported as a **skills-only** agent: `symposium sync` will install skill files in the vendor-neutral `.agents/skills/` path.
 
 ---
 

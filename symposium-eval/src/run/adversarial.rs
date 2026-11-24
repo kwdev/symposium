@@ -1,29 +1,17 @@
 //! Real sandbox regressions with fake credentials and no model requests.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tempfile::TempDir;
 
-use super::test_support::{RealSrt, api_key, on_path};
+use super::test_support::{RealSrt, api_key, on_path, wait_for};
 use super::{ApiKey, Configuration};
 
 const DEADLINE: Duration = Duration::from_secs(60);
-
-fn wait_for(path: &Path) {
-    let deadline = Instant::now() + DEADLINE;
-    while !path.is_file() {
-        assert!(
-            Instant::now() < deadline,
-            "never created {}",
-            path.display()
-        );
-        thread::sleep(Duration::from_millis(20));
-    }
-}
 
 #[test]
 #[ignore = "needs node, srt, and bubblewrap installed"]
@@ -236,7 +224,7 @@ fn check_failed_setup(timeout: bool) {
 
     let mut real = RealSrt::new(api_key());
     let source = TempDir::new().unwrap();
-    let fake = source.path().join("cargo-agents");
+    let fake = source.path().join("symposium");
     let mut script = String::from(
         r#"#!/bin/sh
 set -eu
@@ -251,7 +239,7 @@ while [ ! -f "$TMPDIR/child-ready" ]; do sleep 0.02; done
     );
     script.push_str(if timeout { "sleep 60\n" } else { "exit 23\n" });
     executable(&fake, &script);
-    real.stage("cargo-agents", &Tool::Executable(fake), Audience::Symposium);
+    real.stage("symposium", &Tool::Executable(fake), Audience::Symposium);
     let trial = real.trial(1, Configuration::Symposium);
     let result = real.try_set_up_symposium(&trial, Client::ClaudeCode, Duration::from_secs(5));
     assert!(
@@ -285,10 +273,9 @@ while [ ! -f "$TMPDIR/child-ready" ]; do sleep 0.02; done
         trial.symposium_config().is_file(),
         "failed setup evidence was removed"
     );
-    let (evals, task) = store_durability();
-    let retry = real
-        .batch()
-        .create_trial(1, Configuration::Symposium, &evals, &task);
+    let retry =
+        real.batch()
+            .create_trial(1, Configuration::Symposium, &store_durability(real.batch()));
     assert!(
         matches!(retry, Err(RunError::Create { source, .. }) if source.kind() == std::io::ErrorKind::AlreadyExists)
     );

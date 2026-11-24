@@ -7,11 +7,15 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Client {
     ClaudeCode,
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the Codex adapter comes in RFD step 7")
+    )]
     Codex,
 }
 
 impl Client {
-    /// The name `cargo agents init --add-agent` takes.
+    /// The name `symposium init --add-agent` takes.
     pub(crate) fn symposium_name(self) -> &'static str {
         match self {
             Self::ClaudeCode => "claude",

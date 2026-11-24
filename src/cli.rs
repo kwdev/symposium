@@ -7,7 +7,7 @@ use std::ffi::OsString;
 use std::path::Path;
 
 use anyhow::{Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
 use crate::config::Symposium;
 use crate::crate_command::{self, DispatchResult};
@@ -21,13 +21,13 @@ use crate::self_update;
 use crate::status_command;
 use crate::subcommand_dispatch::dispatch_external;
 use crate::sync;
+use crate::try_command;
 use crate::use_command;
 
 /// Parsed CLI arguments.
 #[derive(Debug, Parser)]
 #[command(
-    name = "cargo-agents",
-    bin_name = "cargo agents",
+    name = "symposium",
     version,
     about = "AI the Rust Way",
     allow_external_subcommands = true,
@@ -162,6 +162,34 @@ pub enum TelemetryCommand {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Binary {
+    Symposium,
+    CargoAgents,
+}
+
+impl Binary {
+    pub fn name(self) -> &'static str {
+        match self {
+            Binary::Symposium => "symposium",
+            Binary::CargoAgents => "cargo agents",
+        }
+    }
+
+    pub fn command(self) -> clap::Command {
+        Cli::command().bin_name(self.name())
+    }
+
+    pub fn parse<I, T>(self, args: I) -> Result<Cli, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString> + Clone,
+    {
+        let mut matches = self.command().try_get_matches_from(args)?;
+        Cli::from_arg_matches_mut(&mut matches).map_err(|err| err.format(&mut self.command()))
+    }
+}
+
 /// Audience section a built-in subcommand belongs to in `--help`.
 ///
 /// `None` means the subcommand is hidden (omitted from help entirely).
@@ -194,6 +222,13 @@ pub enum PluginCommand {
         plugin: String,
     },
 
+    /// Print the payload digest an audits file matches a crate on
+    Digest {
+        /// A crate's source directory, or a crate name, optionally
+        /// `name@version` for one exact release
+        target: String,
+    },
+
     /// Validate a plugin source directory or a single TOML manifest
     Validate {
         /// Path to a directory or a single .toml file
@@ -202,6 +237,26 @@ pub enum PluginCommand {
         /// Skip checking that crate names in predicates exist on crates.io
         #[arg(long)]
         no_check_crates: bool,
+    },
+
+    /// Turn a Claude Code plugin into an Agent Plugins package
+    Import {
+        /// Path to the Claude Code plugin directory
+        path: std::path::PathBuf,
+
+        /// Directory to write the package into, as `<out>/<name>/`
+        #[arg(long, default_value = ".")]
+        out: std::path::PathBuf,
+    },
+
+    /// Install a local plugin in your agents, or discard the trial with --remove
+    Try {
+        /// Path to the plugin or skill directory (with --remove, its path or name)
+        path: std::path::PathBuf,
+
+        /// Undo the trial: unlink the plugin, drop its enablement, and re-sync
+        #[arg(long)]
+        remove: bool,
     },
 }
 
@@ -218,11 +273,11 @@ pub async fn run(
     out: &Output,
     update: symposium_install::UpdateLevel,
 ) -> Result<()> {
-    // Periodic update check (skipped for self-update, which always checks).
-    // In the binary, re-exec happens if auto-update = "on" succeeds.
-    // Here in the library we just run the warn check; the binary wraps
-    // this with re-exec logic.
-    if !matches!(cmd, Commands::SelfUpdate) {
+    // Periodic update check (skipped for self-update, which always checks,
+    // and for `plugin digest`, whose stdout is its result). In the binary,
+    // re-exec happens if auto-update = "on" succeeds. Here in the library we
+    // just run the warn check; the binary wraps this with re-exec logic.
+    if self_update::checks_before(&cmd) {
         self_update::maybe_warn_for_update(sym, out);
     }
 
@@ -242,12 +297,13 @@ pub async fn run(
 
         Commands::Sync => {
             let deps = sym.workspace(cwd);
-            // The consent prompt belongs to a human running `cargo agents
+            // The consent prompt belongs to a human running `symposium
             // sync`; it is inert unless `out` is interactive, and the
             // hook-triggered auto-sync path calls `sync::sync` directly and
             // never reaches here at all.
             discovery::prompt_for_consent(sym, &deps, out).await?;
-            sync::sync(sym, &deps, update).await
+            sync::sync(sym, &deps, update).await?;
+            Ok(())
         }
 
         Commands::Search { query } => search_command::search(sym, &query).await,
@@ -297,7 +353,7 @@ pub async fn run(
                     out.println(
                         "Telemetry enabled. Events are stored locally under the telemetry \
                          directory and are never uploaded automatically — review them with \
-                         `cargo agents telemetry show`.",
+                         `symposium telemetry show`.",
                     );
                 }
                 TelemetryCommand::Disable => {
@@ -332,6 +388,21 @@ pub async fn run(
                 code => bail!("subcommand exited with status: {code}"),
             }
         }
+        Commands::Plugin {
+            command: PluginCommand::Try { path, remove },
+        } => {
+            if remove {
+                try_command::remove_trial(sym, cwd, &path, update).await
+            } else {
+                try_command::try_plugin(sym, cwd, &path, update).await
+            }
+        }
+        // `plugin digest` is library code (it only reports), so the test
+        // harness exercises the same path as the binary.
+        Commands::Plugin {
+            command: PluginCommand::Digest { target },
+        } => crate::audits::digest_command::run(sym, cwd, &target).await,
+
         // These commands can't easily be extracted since they do I/O
         // (stdin/stdout for hooks). The binary handles them directly.
         Commands::Hook { .. } | Commands::Plugin { .. } => {

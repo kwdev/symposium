@@ -13,11 +13,11 @@ A deny or rewrite that the translation drops fails open: the tool runs, and sinc
 
 ### Copilot also runs Claude Code's hooks
 
-Copilot CLI reads `.claude/settings.json` as well as its own hook files. In a project where both agents are configured, every Copilot event runs `cargo agents hook` twice: as `copilot` from `.github/hooks/symposium.json`, and as `claude` from Claude's settings. Plugin hooks with side effects run twice, and whatever symposium tells the agent once (such as a notice) is taken by whichever invocation runs first.
+Copilot CLI reads `.claude/settings.json` as well as its own hook files. In a project where both agents are configured, every Copilot event runs `symposium hook` twice: as `copilot` from `.github/hooks/symposium.json`, and as `claude` from Claude's settings. Plugin hooks with side effects run twice, and whatever symposium tells the agent once (such as a notice) is taken by whichever invocation runs first.
 
 ## Hook stdout belongs to the agent
 
-An agent parses everything `cargo agents hook` writes to stdout. One line ahead of the JSON and Claude Code falls back to treating it all as plain text (which reaches the model only on `SessionStart` and `UserPromptSubmit`), while Copilot drops the output entirely. The in-process test pipeline cannot see this, because the leaks come from around it: the report layer, which the binary installs (and leaves out for hooks), and child processes that inherit stdout (plugin `install_commands` send theirs to stderr). Anything new that prints during a hook, or spawns a child that might, needs the same care; `tests/hook_stdout.rs` runs the real binary to catch it.
+An agent parses everything `symposium hook` writes to stdout. One line ahead of the JSON and Claude Code falls back to treating it all as plain text (which reaches the model only on `SessionStart` and `UserPromptSubmit`), while Copilot drops the output entirely. The in-process test pipeline cannot see this, because the leaks come from around it: the report layer, which the binary installs (and leaves out for hooks), and child processes that inherit stdout (plugin `install_commands` send theirs to stderr). Anything new that prints during a hook, or spawns a child that might, needs the same care; `tests/hook_stdout.rs` runs the real binary to catch it.
 
 ## Antigravity footguns
 
@@ -27,12 +27,18 @@ knowing before debugging a hook that "does nothing".
 ### `{}` on `PreToolUse` denies the tool call
 
 Antigravity ignores hook exit codes entirely; only stdout decides. On
-`PreToolUse`, an object without a valid `decision` — `{}` included, as well as
-`{"decision": ""}` — is treated as a **denial**, while writing nothing at all
-allows. Symposium's dispatcher would otherwise return `{}` whenever no plugin contributed, which
-is the common case, so `AntigravityPreToolUseOutput` keeps `decision` as a plain
-always-serialized field defaulting to `allow`. Making it `Option` or adding
-`skip_serializing_if` would block every tool call.
+`PreToolUse`, an object without a valid `decision` (`{}` included, as well as
+`{"decision": ""}`) is treated as a **denial**, while writing nothing at all
+allows. A plugin hook in Antigravity's own format that answers with no
+`decision` (or an empty one) is read as the denial it is, so dispatch stops
+there.
+
+Symposium's own answer leaves `decision` unset unless something decided, so a
+hook that only adds context cannot overwrite another hook's `"ask"`. That makes
+`{}` the common final answer (no plugin contributed, or one only added context),
+so `AntigravityPreToolUseEvent::respond`, which every response goes through, adds
+`"decision": "allow"` to a final object that has none. Dropping that step would
+block every tool call.
 
 ### Unknown event names and shapes are accepted and never fire
 
@@ -52,6 +58,10 @@ And when two walks over one tree feed each other — a copy, and the comparison 
 
 Destinations need the opposite treatment. A link found in an agent's skills directory is the user's, so `sync` never follows it, and since one agent's skills directory can itself be a link to another's, install targets are compared by resolved path. Comparing literal paths there made the reap delete, through the link, the skills it had just installed. To ask whether a destination slot is taken, use `fs::symlink_metadata`: `Path::exists()` follows the link and reports a dangling one as absent, and installing into that slot then fails on every sync.
 
+## Bookkeeping beside content is not content
+
+A directory Symposium reads skills from can also hold a file Symposium keeps for itself: the git cache writes its metadata (`.symposium-cache-meta.json`, with the time of the last freshness check) inside each cache entry, and a `source.git` group whose URL names a skill directory is read from that entry in place. Such a file changes without the skill changing, so a walk that installs or compares content has to leave it out, as `sync`'s `walk_tree` does. Copying it would make every freshness check look like an update of each installed copy, and every agent would be told the plugin changed.
+
 ## Plugin-supplied names are untrusted input
 
 Plugin content must not decide where Symposium writes. A name it supplies, such as a skill's `name`, can resolve outside the directory it is joined onto (`Path::join` does not confine it), so it never becomes part of a path unchecked. Validate it with `skills::is_safe_dir_name`, which also covers Windows-specific path forms, rather than with a check of your own.
@@ -59,6 +69,8 @@ Plugin content must not decide where Symposium writes. A name it supplies, such 
 ## Names compare as package identities
 
 Whether two names are the same package is the package manager's rule, not a string comparison: cargo treats `widget-lib` and `widget_lib` as one crate, while a registry compares its plugin names exactly. So code that matches a name typed by the user against a plugin or a dependency resolves both through `PmRegistry::identify` or `PmRegistry::identity` and compares the results, rather than comparing strings or applying one ecosystem's normalization to every name. Nor is a name a crate by default: `identify` asks the package managers whether they have it and fails with `no package named ...` when none does. A `[plugins]` entry names no package manager, so the `PluginsConfig` queries take the `PackageId` being checked and compare the entry under that id's package manager: `disable = ["my_plugin"]` covers the crate `my-plugin` but not a registry plugin named `my-plugin`. A `"*"` entry is a pattern, not a name: the `PluginsConfig` queries treat it as matching everything, so code that lists entries skips it rather than reporting it as a plugin.
+
+An identity is for comparing, never for loading. `PmRegistry::identity` and `identify` return the name in the package manager's folded form (`widget_lib` for the crate `widget-lib`), and a package manager fetches a package under the name it is published as: cargo finds no `widget_lib` on crates.io. So a `fetch` or `load_plugin` takes the id `PmRegistry::find` answers with, which names the package as its package manager has it, or one the dependency list gave, as `enabled_dependencies` and `use` do, and the identity only decides whether two of those are the same package. A name stored for later, such as a `use` entry, is the one `find` answered with too. A registry plugin is the exception: the id `find` answers with carries its manifest name, while a registry's package manager loads an entry by its path in the registry, so code that needs a registry plugin again takes it from the loaded registry, matched by identity, as `remove_plugin` does.
 
 ## Remote package managers need identity and lifecycle boundaries
 
@@ -95,11 +107,23 @@ A listing that swallows read errors returns the same empty list for "nothing the
 
 ## One decision computed twice drifts
 
-Where one rule guards several passes, bind it once and have every guard read that binding. `sync` has two such passes, the project MCP removal inside the per-agent loop and the stale-skill reap after it, and both read the single `skip_cleanup`. Spelling the rule out twice instead invites the copies to diverge, and a shadowed rebinding hides the divergence at the use site: the guard still reads `skip_cleanup`, so nothing there says which of the two it got. Had one copy omitted `Workspace::failed`, a failed package manager would keep its skills and silently lose its MCP entries, which is exactly the data loss the rule exists to prevent. The same holds for anything else derived from a condition several passes share.
+Where one rule guards several passes, bind it once and have every guard read that binding. `sync` has several such passes, the project MCP removal inside the per-agent loop, the MCP removal for a plugin `use --remove` disabled, and the stale-skill reap, and all read the single `skip_cleanup`. Spelling the rule out twice instead invites the copies to diverge, and a shadowed rebinding hides the divergence at the use site: the guard still reads `skip_cleanup`, so nothing there says which of the two it got. Had one copy omitted `Workspace::failed`, a failed package manager would keep its skills and silently lose its MCP entries, which is exactly the data loss the rule exists to prevent. The same holds for anything else derived from a condition several passes share, and across entry points: `sync_user_plugins` compiles and reaps the user-level plugins outside a workspace, so the rule is one function, `cleanup_held_back`, that it and `sync` both call.
 
 ## An input that does not exist yet is still an input
 
 A cache keyed on "have my inputs changed?" has to name the files whose *appearance* changes the answer, not just the ones it read. `ProjectInfo::inputs` is the files a package manager's answers depend on, and the mtime of a file that does not exist records as `None`, so a path reported while absent and later found present reads as a change. That is what lets a hook notice a workspace it could not have read before: a `Cargo.toml` appearing between the session's starting directory and the cached root re-roots the workspace, and no lockfile under the old root would ever show it. A package manager that reports only the files it actually opened will pin a stale root for the rest of the session. The matching rule on the consumer side is already in `WorkspaceState::fresh`: a workspace that names no inputs is never fresh, since nothing would tell that its answers had changed.
+
+## Agent Plugins manifests are closed but forgiving
+
+`plugin.json` has a closed schema, yet the format requires an unknown top-level field, or an `extensions` that is not an object, to be reported and ignored while the package still loads. `#[serde(deny_unknown_fields)]` would reject the package instead, and a plain `Option<String>` would accept the `null` the schema forbids, which is why `plugins/agent_plugin.rs` checks the manifest by hand over a `serde_json::Value`. Its `dev.symposium` namespace is the opposite case and stays strict, because ignoring a typo there would make a package apply more widely than its author meant.
+
+## Installed copies are never sources
+
+A directory Symposium installed carries a `.symposium` marker file, and the trees it installs into can also be read as sources (`.agents/skills/` is a workspace skill group, and a registry can point at a tree holding copies). Any walk that discovers sources skips marked directories, as `find_skill_files_recursive` and the registry layout walk do, or a sync reads its own output back. The layout walk checks that the marker is a file, because a project root can hold a `.symposium/` directory that is not a marker.
+
+## An unchanged config file is not written
+
+MCP registration runs on every sync, sync runs at every session start, and the agent rewrites the same file, so a registration with nothing to change must not write. Two things hid one that wrote every time. The check compared text: a Codex entry parsed from the file carries the blank line above its header, so it never rendered like a freshly built one, and Goose's section was compared with its indentation stripped against a snippet that kept it. Compare parsed values instead (`toml_entry_values`, `yaml_values`), which also leaves alone an entry the agent or the user laid out differently. And the tests compared the file's content before and after, which a rewrite with the same bytes passes: assert on the modification time, as `assert_second_registration_writes_nothing` does.
 
 ## Windows portability (tests)
 

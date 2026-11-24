@@ -39,6 +39,7 @@ pub use remote::{RemotePm, RemotePmCommand};
 /// The cargo package manager is its own crate, because it has to be one to run
 /// as its own binary. Re-exported here so the rest of Symposium keeps naming one `pm`
 /// module regardless of where a PM's code lives.
+pub(crate) use symposium_pm_cargo::embedded_plugin_kind;
 pub use symposium_pm_cargo::{
     CargoPm, LoadedWorkspace, WorkspaceCrate, WorkspaceDeps, file_mtime, workspace_dir_name,
 };
@@ -365,11 +366,20 @@ fn absolute(instance: &str, id: &PackageId, dir: &std::path::Path) -> bool {
 /// by their `pm` component ([`PackageId::pm`]) to the instance that owns them.
 pub struct PmRegistry {
     instances: Vec<PmInstance>,
+    /// The payload digests computed through this set, so one invocation
+    /// hashes each loaded payload once however many routes look it up. The
+    /// package managers never read it: it belongs to the [audits](crate::audits)
+    /// reader, and lives here because this is the per-invocation value every
+    /// lookup is handed.
+    pub(crate) payload_digests: crate::audits::DigestMemo,
 }
 
 impl PmRegistry {
     pub fn new(instances: Vec<PmInstance>) -> Self {
-        Self { instances }
+        Self {
+            instances,
+            payload_digests: Default::default(),
+        }
     }
 
     /// Every instance, in order (cargo transport first, then registries).
@@ -418,11 +428,12 @@ impl PmRegistry {
         Ok(canonical[1..].iter().any(|name| *name == canonical[0]))
     }
 
-    /// The identity of the package a user-typed `name` refers to. A plugin in
-    /// `plugins` with that name under its registry's rule wins; otherwise the
-    /// first package manager whose [`find`](PmInstance::find) has the name at
-    /// `update` answers. A name no package manager has is an error.
-    pub async fn identify(
+    /// The package a user-typed `name` refers to, named as its package manager
+    /// has it. A plugin in `plugins` with that name under its registry's rule
+    /// wins; otherwise the first package manager whose
+    /// [`find`](PmInstance::find) has the name at `update` answers. A name no
+    /// package manager has is an error.
+    pub async fn find(
         &self,
         plugins: &[Plugin],
         name: &str,
@@ -437,15 +448,29 @@ impl PmRegistry {
                 .await
                 .unwrap_or(false)
             {
-                return self.identity(&plugin.canonical).await;
+                return Ok(PackageId::any_version(
+                    &plugin.canonical.pm,
+                    &plugin.canonical.name,
+                ));
             }
         }
         for inst in &self.instances {
             if let Some(id) = inst.find(name, update).await {
-                return self.identity(&id).await;
+                return Ok(PackageId::any_version(&id.pm, &id.name));
             }
         }
         anyhow::bail!("no package named `{name}`")
+    }
+
+    /// The identity of the package [`find`](Self::find) answers with.
+    pub async fn identify(
+        &self,
+        plugins: &[Plugin],
+        name: &str,
+        update: UpdateLevel,
+    ) -> Result<PackageId> {
+        self.identity(&self.find(plugins, name, update).await?)
+            .await
     }
 
     /// Fetch a package via the instance named in its id.
@@ -1066,7 +1091,7 @@ mod tests {
         let pm = GitPm::new("reg", "https://github.com/example/reg", ctx).unwrap();
         let err = pm.active_plugins(&[]).await.unwrap_err();
         assert!(
-            err.to_string().contains("cargo agents plugin sync reg"),
+            err.to_string().contains("symposium plugin sync reg"),
             "{err}"
         );
     }

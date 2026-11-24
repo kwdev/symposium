@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use crate::{InstallContext, UpdateLevel};
 
 /// Minimum interval between freshness checks for cached sources.
-const DEBOUNCE_DURATION: std::time::Duration = std::time::Duration::from_secs(60);
+pub const DEBOUNCE_DURATION: std::time::Duration = std::time::Duration::from_secs(60);
 
 // ── Public parsed-URL type ──────────────────────────────────────────────
 
@@ -136,7 +136,7 @@ struct GitHubClient {
 impl GitHubClient {
     fn new() -> Self {
         let client = reqwest::Client::builder()
-            .user_agent("cargo-agents")
+            .user_agent("symposium")
             .build()
             .expect("failed to build HTTP client");
         Self { client }
@@ -230,7 +230,8 @@ pub struct PluginCacheMeta {
     pub source_url: String,
 }
 
-const CACHE_META_FILENAME: &str = ".symposium-cache-meta.json";
+/// The file a cache entry's [`PluginCacheMeta`] is kept in, inside the cached directory.
+pub const CACHE_META_FILENAME: &str = ".symposium-cache-meta.json";
 
 /// Manages downloading and caching of git-sourced plugin artifacts.
 pub struct GitCacheManager {

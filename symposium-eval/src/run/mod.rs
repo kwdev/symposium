@@ -7,7 +7,8 @@
 //! ```text
 //! <eval-root>/<batch>/
 //!   tools/common/        staged clients, readable by every trial
-//!   tools/symposium/     staged cargo-agents, readable by Symposium trials only
+//!   tools/symposium/     staged symposium, readable by Symposium trials only
+//!   preflight/<task>/    retained model-free grading preparation
 //!   trial-<n>-<with|without>-symposium/
 //! ```
 //!
@@ -22,19 +23,29 @@
 
 #[cfg(all(test, target_os = "linux"))]
 mod adversarial;
+mod allocate;
 pub(crate) mod client;
 mod env;
 mod error;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "--exploratory needs its own design")
+)]
 mod exploratory;
+mod grading;
+mod inputs;
 mod policy;
 mod prelaunch;
+#[cfg(all(test, target_os = "linux"))]
+mod runtime_tmp;
 pub(crate) mod setup;
 #[cfg(all(test, target_os = "linux"))]
 mod smoke;
-mod srt;
+pub(crate) mod srt;
 pub(crate) mod stage;
 #[cfg(test)]
 pub(crate) mod test_support;
+pub(crate) mod trial;
 
 use std::fmt;
 use std::fs;
@@ -42,18 +53,17 @@ use std::path::{Path, PathBuf};
 
 pub(crate) use env::ApiKey;
 pub(crate) use error::{RunError, Unready};
+pub(crate) use inputs::Inputs;
 pub(crate) use policy::{Machine, Policy, Reach};
 pub(crate) use srt::SRT_VERSION;
 use stage::StagedTool;
 
-use crate::evals::Evals;
 use crate::grade::ProcessError;
-use crate::grade::copy_tree;
 use crate::grade::process::Finished;
-use crate::task::{BatchName, Task};
+use crate::task::BatchName;
 
 /// Whether a trial can reach Symposium. Nothing is installed or uninstalled between the
-/// two: a baseline trial simply cannot read the staged `cargo-agents`.
+/// two: a baseline trial simply cannot read the staged `symposium`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Configuration {
     Baseline,
@@ -126,6 +136,11 @@ impl Batch {
         Ok(batch)
     }
 
+    /// The batch's own directory, named for the batch.
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// The canonical evaluation root, which holds other batches and their trials.
     pub(crate) fn eval_root(&self) -> &Path {
         &self.eval_root
@@ -145,61 +160,9 @@ impl Batch {
         self.root.join("tools").join("common")
     }
 
-    /// The `cargo-agents` under evaluation, readable by Symposium trials only.
+    /// The `symposium` under evaluation, readable by Symposium trials only.
     pub(crate) fn symposium_tools(&self) -> PathBuf {
         self.root.join("tools").join("symposium")
-    }
-
-    /// Creates trial `number` of `task`: empty working directories, the starter in
-    /// `project/`, the fixtures beside it, and, for Symposium, the task's plugins as the
-    /// trial's registry.
-    ///
-    /// # Errors
-    ///
-    /// When the trial already exists, a directory cannot be created, or the task cannot
-    /// be copied.
-    pub(crate) fn create_trial(
-        &self,
-        number: usize,
-        configuration: Configuration,
-        evals: &Evals,
-        task: &Task,
-    ) -> Result<Trial, RunError> {
-        let trial = Trial {
-            batch: self.clone(),
-            root: self.root.join(format!("trial-{number}-{configuration}")),
-            configuration,
-        };
-        create_fresh(&trial.root)?;
-        create_dirs([
-            trial.home(),
-            trial.bin(),
-            trial.cargo_home(),
-            trial.tmp(),
-            trial.evidence(),
-            trial.session(),
-        ])?;
-        self.link_tools(&trial)?;
-        copy_tree(&evals.starter_dir(task.name()), &trial.project(), "starter")
-            .map_err(RunError::Copy)?;
-        // `srt` write-protects `.claude/commands` in the project. Where `.claude/` is
-        // missing, it protects all of `.claude/` instead, and no skill could be installed.
-        create_dirs([trial.project().join(".claude")])?;
-        // Fixtures are not in the policy's writable paths, so `srt` keeps them read-only.
-        for fixture in task.fixtures() {
-            let destination = trial.fixtures().join(fixture.as_str());
-            copy_tree(&evals.fixture_dir(fixture), &destination, "fixture")
-                .map_err(RunError::Copy)?;
-        }
-        if configuration == Configuration::Symposium {
-            create_dirs([trial.registry()])?;
-            for plugin in task.plugins() {
-                let destination = trial.registry().join(plugin.as_str());
-                copy_tree(&evals.plugin_dir(plugin), &destination, "plugin")
-                    .map_err(RunError::Copy)?;
-            }
-        }
-        Ok(trial)
     }
 }
 
@@ -310,9 +273,12 @@ pub(crate) fn succeeded(
     tool: &'static str,
     finished: Result<Finished, ProcessError>,
 ) -> Result<Finished, RunError> {
-    let finished = finished.map_err(|source| RunError::Process { tool, source })?;
+    let mut finished = finished.map_err(|source| RunError::Process { tool, source })?;
     let Some(status) = finished.status else {
-        return Err(RunError::ToolTimeout { tool });
+        return Err(RunError::ToolTimeout {
+            tool,
+            after_deadline: finished.after_deadline.take(),
+        });
     };
     if !status.success() {
         return Err(RunError::ToolFailed {
@@ -353,18 +319,13 @@ fn create_dirs(paths: impl IntoIterator<Item = PathBuf>) -> Result<(), RunError>
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error as _;
     use std::io;
 
     use tempfile::TempDir;
 
     use super::*;
-    use crate::task::TaskName;
-
-    fn store_durability() -> (Evals, Task) {
-        let evals = Evals::in_repository();
-        let task = Task::load(&evals, &TaskName::new("store-durability").unwrap()).unwrap();
-        (evals, task)
-    }
+    use crate::run::test_support::store_durability;
 
     fn batch_name() -> BatchName {
         BatchName::new("batch").unwrap()
@@ -378,13 +339,32 @@ mod tests {
     }
 
     #[test]
+    fn a_tool_timeout_keeps_what_failed_after_its_deadline() {
+        let mut finished = Finished::never_started();
+        finished.after_deadline = Some(ProcessError::OutputNotClosed);
+
+        let error = succeeded("probe", Ok(finished)).unwrap_err();
+
+        assert!(matches!(
+            error,
+            RunError::ToolTimeout {
+                after_deadline: Some(ProcessError::OutputNotClosed),
+                ..
+            }
+        ));
+        assert_eq!(
+            error.source().unwrap().to_string(),
+            "the command's output stayed open after it ended"
+        );
+    }
+
+    #[test]
     fn a_symposium_trial_holds_the_task_and_its_registry() {
-        let (evals, task) = store_durability();
         let root = TempDir::new().unwrap();
         let batch = Batch::create(root.path(), &batch_name()).unwrap();
 
         let trial = batch
-            .create_trial(1, Configuration::Symposium, &evals, &task)
+            .create_trial(1, Configuration::Symposium, &store_durability(&batch))
             .unwrap();
 
         assert_eq!(
@@ -407,12 +387,11 @@ mod tests {
 
     #[test]
     fn a_baseline_trial_has_no_registry() {
-        let (evals, task) = store_durability();
         let root = TempDir::new().unwrap();
         let batch = Batch::create(root.path(), &batch_name()).unwrap();
 
         let trial = batch
-            .create_trial(2, Configuration::Baseline, &evals, &task)
+            .create_trial(2, Configuration::Baseline, &store_durability(&batch))
             .unwrap();
 
         assert_eq!(
@@ -425,16 +404,16 @@ mod tests {
 
     #[test]
     fn an_existing_trial_is_never_reused() {
-        let (evals, task) = store_durability();
         let root = TempDir::new().unwrap();
         let batch = Batch::create(root.path(), &batch_name()).unwrap();
+        let inputs = store_durability(&batch);
         let trial = batch
-            .create_trial(1, Configuration::Baseline, &evals, &task)
+            .create_trial(1, Configuration::Baseline, &inputs)
             .unwrap();
         let sentinel = trial.home().join("sentinel");
         fs::write(&sentinel, "earlier attempt").unwrap();
 
-        let again = batch.create_trial(1, Configuration::Baseline, &evals, &task);
+        let again = batch.create_trial(1, Configuration::Baseline, &inputs);
 
         assert!(already_exists(again));
         assert!(sentinel.is_file());

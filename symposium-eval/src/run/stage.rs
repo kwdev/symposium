@@ -9,13 +9,13 @@
 //! tool its configuration may run, so a client finds it by name.
 //!
 //! Tools are staged before any trial is created: a trial links only what is staged by then.
-//!
-//! FIXME: record each staged tool's hash in the results, once there are results.
+//! A staged tool's digest is of the copy, which is what trials run.
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use super::{Batch, Configuration, RunError, Trial};
+use crate::digest::{self, Digest, DigestError};
 use crate::grade::copy_exact;
 use crate::task::ToolName;
 
@@ -24,12 +24,12 @@ use crate::task::ToolName;
 pub(crate) enum Audience {
     /// Every trial: the clients and what they need.
     Common,
-    /// Symposium trials only: the `cargo-agents` under evaluation.
+    /// Symposium trials only: the `symposium` under evaluation.
     Symposium,
 }
 
 /// How a tool is installed on the developer's machine.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Tool {
     /// One executable file, such as a native client or `node`.
     Executable(PathBuf),
@@ -44,6 +44,14 @@ pub(crate) struct StagedTool {
     name: ToolName,
     audience: Audience,
     command: PathBuf,
+    copy: Copy,
+}
+
+/// What staging copied into the batch.
+#[derive(Debug, Clone)]
+enum Copy {
+    File(PathBuf),
+    Package(PathBuf),
 }
 
 impl Audience {
@@ -60,6 +68,18 @@ impl StagedTool {
     pub(crate) fn command(&self) -> &Path {
         &self.command
     }
+
+    /// The digest of the staged copy: of its file, or of its whole package.
+    ///
+    /// # Errors
+    ///
+    /// When the copy cannot be read.
+    pub(crate) fn digest(&self) -> Result<Digest, DigestError> {
+        match &self.copy {
+            Copy::File(path) => digest::file(path),
+            Copy::Package(path) => digest::tree(path),
+        }
+    }
 }
 
 impl Batch {
@@ -74,7 +94,7 @@ impl Batch {
         name: ToolName,
         tool: &Tool,
         audience: Audience,
-    ) -> Result<&StagedTool, RunError> {
+    ) -> Result<StagedTool, RunError> {
         if self.staged.iter().any(|staged| staged.name == name) {
             return Err(RunError::StagedTwice(name.to_string()));
         }
@@ -83,7 +103,7 @@ impl Batch {
             Audience::Symposium => self.symposium_tools(),
         };
         let destination = directory.join(name.as_str());
-        let command = match tool {
+        let (command, copy) = match tool {
             Tool::Executable(source) => {
                 // Copy what a link such as `~/.local/bin/claude` points at.
                 let source =
@@ -96,7 +116,7 @@ impl Batch {
                     path: destination.clone(),
                     source,
                 })?;
-                destination
+                (destination.clone(), Copy::File(destination))
             }
             Tool::NodePackage { package, entry } => {
                 // A missing or unusable entry would only show when a trial runs it.
@@ -104,15 +124,17 @@ impl Batch {
                     return Err(RunError::ToolEntry(entry.clone()));
                 }
                 copy_exact(package, &destination, "tool").map_err(RunError::Stage)?;
-                destination.join(entry)
+                (destination.join(entry), Copy::Package(destination))
             }
         };
-        self.staged.push(StagedTool {
+        let staged = StagedTool {
             name,
             audience,
             command,
-        });
-        Ok(self.staged.last().expect("just pushed"))
+            copy,
+        };
+        self.staged.push(staged.clone());
+        Ok(staged)
     }
 
     /// Links every tool `trial` may run into its `bin/`.
@@ -185,6 +207,28 @@ mod tests {
 
         assert_eq!(staged.command(), batch.symposium_tools().join("tool"));
         assert_eq!(fs::read_to_string(staged.command()).unwrap(), "tool");
+    }
+
+    #[test]
+    fn a_staged_tools_digest_is_of_its_copy() {
+        let host = Host::new();
+        let mut batch = host.batch();
+        let source = host.join("installed-tool");
+        fs::write(&source, "tool").unwrap();
+        let tool = Tool::Executable(source.clone());
+
+        let staged = batch
+            .stage(tool_name("tool"), &tool, Audience::Symposium)
+            .unwrap()
+            .clone();
+        // A later change to the installed tool does not reach the batch.
+        fs::write(&source, "changed").unwrap();
+
+        assert_eq!(
+            staged.digest().unwrap(),
+            digest::file(staged.command()).unwrap()
+        );
+        assert_ne!(staged.digest().unwrap(), digest::file(&source).unwrap());
     }
 
     #[test]
@@ -274,15 +318,15 @@ mod tests {
         batch
             .stage(tool_name("client"), &tool, Audience::Common)
             .unwrap();
-        let (evals, task) = store_durability();
+        let inputs = store_durability(&batch);
 
-        let result = batch.create_trial(1, Configuration::Baseline, &evals, &task);
+        let result = batch.create_trial(1, Configuration::Baseline, &inputs);
 
         assert!(matches!(result, Err(RunError::Link { .. })), "{result:?}");
     }
 
     /// The guarantee behind "without Symposium": a baseline trial's `bin/` has no
-    /// `cargo-agents`.
+    /// `symposium`.
     #[cfg(unix)]
     #[test]
     fn only_a_symposium_trial_links_symposium_tools() {
@@ -297,7 +341,7 @@ mod tests {
             .stage(tool_name("client"), &tool, Audience::Common)
             .unwrap();
         batch
-            .stage(tool_name("cargo-agents"), &tool, Audience::Symposium)
+            .stage(tool_name("symposium"), &tool, Audience::Symposium)
             .unwrap();
 
         let symposium = trial(&batch, 1, Configuration::Symposium);
@@ -311,11 +355,11 @@ mod tests {
             names.sort();
             names
         };
-        assert_eq!(linked(&symposium), ["cargo-agents", "client"]);
+        assert_eq!(linked(&symposium), ["client", "symposium"]);
         assert_eq!(linked(&baseline), ["client"]);
         assert_eq!(
-            fs::read_link(symposium.bin().join("cargo-agents")).unwrap(),
-            batch.symposium_tools().join("cargo-agents")
+            fs::read_link(symposium.bin().join("symposium")).unwrap(),
+            batch.symposium_tools().join("symposium")
         );
     }
 }
